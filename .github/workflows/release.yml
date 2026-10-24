@@ -1,0 +1,124 @@
+name: Release
+on:
+  push:
+    tags: ['v*.*.*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  released:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      done: ${{ steps.check.outputs.done }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          done=false
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then done=true; fi
+          echo "done=$done" >> "$GITHUB_OUTPUT"
+  ci:
+    needs: released
+    if: needs.released.outputs.done != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 17
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Require successful CI on this exact public commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 90); do
+            run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" \
+              --limit 1 --json status,conclusion,url)
+            status=$(jq -r '.[0].status // "missing"' <<< "$run")
+            if [ "$status" = completed ]; then
+              [ "$(jq -r '.[0].conclusion' <<< "$run")" = success ] || { echo "$run"; exit 1; }
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "CI did not complete for $GITHUB_SHA" >&2
+          exit 1
+  image:
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/wiki-hub-server
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build once, smoke both architectures and promote immutable version
+        run: |
+          set -euo pipefail
+          candidate="$IMAGE:sha-$(git rev-parse --short=12 HEAD)"
+          failure=$(mktemp)
+          trap 'rm -f "$failure"' EXIT
+          if docker buildx imagetools inspect "$candidate" >/dev/null 2>"$failure"; then
+            echo "Reusing the candidate already built for this public commit."
+          else
+            grep -Eqi 'manifest unknown|not found' "$failure" || { cat "$failure" >&2; exit 1; }
+            docker buildx build --platform linux/amd64,linux/arm64 --push -t "$candidate" \
+              --build-arg VCS_REF="$GITHUB_SHA" \
+              --build-arg BUILD_DATE="$(git show -s --format=%cI HEAD)" \
+              --build-arg SOURCE_URL="https://github.com/$GITHUB_REPOSITORY" .
+          fi
+          digest=$(docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' | jq -er '.digest')
+          for architecture in amd64 arm64; do
+            docker pull --platform "linux/$architecture" "$IMAGE@$digest"
+            revision=$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE@$digest")
+            [ "$revision" = "$GITHUB_SHA" ]
+            docker run --rm --platform "linux/$architecture" --network none --read-only \
+              --tmpfs /data:uid=1001,gid=1001 --tmpfs /workspaces:uid=1001,gid=1001 \
+              --entrypoint python "$IMAGE@$digest" -c '
+          from pathlib import Path
+          from starlette.testclient import TestClient
+          from wiki_hub.config import Settings
+          from wiki_hub.server import create_app
+          settings=Settings(state_dir=Path("/data"),workspace_dir=Path("/workspaces"),
+            public_url="https://wiki.example.com",oidc_issuer="https://id.example.com",
+            oidc_audience="https://wiki.example.com/mcp",oidc_client_id="wiki-cli",owner_subject="owner",
+            forgejo_url="http://git",forgejo_public_url="https://git.example.com",forgejo_username="system",
+            forgejo_password="synthetic-image-smoke-password",ingest_url="http://runner:8100")
+          with TestClient(create_app(settings)) as client:
+            assert client.get("/health").status_code==200
+            assert client.get("/api/wikis").status_code==401
+            metadata=client.get("/.well-known/oauth-protected-resource/mcp").json()
+            assert metadata["authorization_servers"]==[settings.oidc_issuer]
+          '
+            docker run --rm --platform "linux/$architecture" --network none --read-only \
+              --entrypoint wiki-runner "$IMAGE@$digest" --help
+            docker run --rm --platform "linux/$architecture" --network none --read-only \
+              --entrypoint git "$IMAGE@$digest" lfs version
+          done
+          bash scripts/promote-image.sh "$IMAGE" "$digest" "${GITHUB_REF_NAME#v}"
+          docker buildx imagetools create --prefer-index=false --tag "$IMAGE:latest" "$IMAGE@$digest"
+  github-release:
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --generate-notes

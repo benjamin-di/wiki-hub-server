@@ -1,0 +1,15 @@
+.git
+.venv
+.artifacts
+.pytest_cache
+.ruff_cache
+**/__pycache__
+tests
+*.pyc
+.env
+.env.*
+.setup
+state
+workspaces
+dist
+publish

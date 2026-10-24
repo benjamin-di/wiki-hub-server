@@ -1,0 +1,208 @@
+name: wiki-hub
+
+x-common: &common
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
+
+services:
+  storage-init:
+    image: ${WIKI_HUB_IMAGE:-wiki-hub-local}
+    restart: "no"
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt: [no-new-privileges:true]
+    network_mode: none
+    mem_limit: 64m
+    pids_limit: 32
+    entrypoint:
+      - python
+      - -c
+      - |
+        import os
+        for path, uid in (("/state", 1001), ("/workspaces", 1001),
+                          ("/git-data", 1000), ("/git-config", 1000), ("/identity", 1000)):
+            os.chown(path, uid, uid)
+    volumes:
+      - app:/state
+      - workspaces:/workspaces
+      - git-data:/git-data
+      - git-config:/git-config
+      - identity:/identity
+
+  app:
+    <<: *common
+    build: {context: ..}
+    image: ${WIKI_HUB_IMAGE:-wiki-hub-local}
+    user: "1001:1001"
+    mem_limit: 512m
+    pids_limit: 256
+    environment:
+      WIKI_PUBLIC_URL: ${WIKI_PUBLIC_URL:?set the public wiki URL}
+      OIDC_ISSUER: ${OIDC_ISSUER:?set the identity issuer}
+      OIDC_JWKS_URL: http://id:1411/.well-known/jwks.json
+      WIKI_OIDC_CLIENT_ID: wiki-cli
+      WIKI_OWNER_SUBJECT: ${WIKI_OWNER_SUBJECT:-}
+      FORGEJO_URL: http://git:3000
+      FORGEJO_PUBLIC_URL: ${FORGEJO_PUBLIC_URL:?set the public Git URL}
+      FORGEJO_USERNAME: ${FORGEJO_USERNAME:?set the system Git account}
+      FORGEJO_PASSWORD: ${FORGEJO_PASSWORD:?generate the system Git password}
+      WIKI_INGEST_URL: http://runner:8100
+      WIKI_STATE_DIR: /data
+      WIKI_WORKSPACE_DIR: /workspaces
+    volumes: [app:/data, workspaces:/workspaces]
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=128m,uid=1001,gid=1001,mode=1777"]
+    ports: [127.0.0.1:8000:8000]
+    networks: [backend, jobs, edge]
+    depends_on:
+      git: {condition: service_healthy}
+      id: {condition: service_healthy}
+      runner: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 2m
+      start_interval: 2s
+
+  runner:
+    <<: *common
+    image: ${WIKI_HUB_IMAGE:-wiki-hub-local}
+    entrypoint: [wiki-runner]
+    user: "1001:1001"
+    mem_limit: 512m
+    pids_limit: 128
+    environment:
+      WIKI_ROOT: /workspaces
+      WIKI_MODEL_URL: ${WIKI_MODEL_URL:?set a compatible model endpoint}
+      WIKI_MODEL_NAME: ${WIKI_MODEL_NAME:?choose the model at that endpoint}
+      WIKI_MODEL_API_KEY: ${WIKI_MODEL_API_KEY:-}
+      WIKI_MODEL_RESPONSE_FORMAT: ${WIKI_MODEL_RESPONSE_FORMAT:-json_schema}
+      WIKI_MODEL_TOKEN_PARAMETER: ${WIKI_MODEL_TOKEN_PARAMETER:-max_completion_tokens}
+      WIKI_MODEL_OUTPUT_TOKENS: ${WIKI_MODEL_OUTPUT_TOKENS:-8192}
+      WIKI_MODEL_CONTEXT_LIMIT: ${WIKI_MODEL_CONTEXT_LIMIT:-256000}
+      WIKI_MODEL_RESPONSE_LIMIT: ${WIKI_MODEL_RESPONSE_LIMIT:-2000000}
+    volumes: [workspaces:/workspaces]
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=64m,uid=1001,gid=1001,mode=1777"]
+    networks: [jobs, models]
+    depends_on:
+      storage-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/health', timeout=4)"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 2m
+      start_interval: 2s
+
+  git:
+    <<: *common
+    image: codeberg.org/forgejo/forgejo:17.0.0-rootless@sha256:0d25f962dabb77a1f1b8c3cc532cd37f95b63a9ed4a68cbac87bad8732cb4c5d
+    user: "1000:1000"
+    mem_limit: 768m
+    pids_limit: 256
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+      GITEA_APP_INI: /etc/gitea/app.ini
+      FORGEJO_USERNAME: ${FORGEJO_USERNAME}
+      FORGEJO_PASSWORD: ${FORGEJO_PASSWORD}
+      FORGEJO__server__ROOT_URL: ${FORGEJO_PUBLIC_URL}/
+      FORGEJO__server__DISABLE_SSH: "true"
+      FORGEJO__server__LFS_START_SERVER: "true"
+      FORGEJO__database__DB_TYPE: sqlite3
+      FORGEJO__security__INSTALL_LOCK: "true"
+      FORGEJO__security__DISABLE_GIT_HOOKS: "true"
+      FORGEJO__service__DISABLE_REGISTRATION: "true"
+      FORGEJO__service__REQUIRE_SIGNIN_VIEW: "true"
+      FORGEJO__repository__DEFAULT_PRIVATE: private
+      FORGEJO__repository__FORCE_PRIVATE: "true"
+      FORGEJO__repository__DISABLE_MIGRATIONS: "true"
+      FORGEJO__repository__ENABLE_PUSH_CREATE_USER: "false"
+      FORGEJO__repository__ENABLE_PUSH_CREATE_ORG: "false"
+      FORGEJO__actions__ENABLED: "false"
+    volumes: [git-data:/var/lib/gitea, git-config:/etc/gitea]
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=128m,uid=1000,gid=1000,mode=1777
+      - /run:rw,nosuid,nodev,size=8m,uid=1000,gid=1000,mode=0755
+    ports: [127.0.0.1:3000:3000]
+    networks: [backend, edge]
+    depends_on:
+      storage-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, wget, -q, --spider, http://127.0.0.1:3000/api/healthz]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 2m
+      start_interval: 2s
+
+  id:
+    <<: *common
+    image: ghcr.io/pocket-id/pocket-id:v2.19.1@sha256:f966fcebd3530ff1d075c0a7500c8baeb71bf42d629ca5f4fdaabb8cbc1afb8c
+    user: "1000:1000"
+    mem_limit: 256m
+    pids_limit: 128
+    environment:
+      APP_URL: ${OIDC_ISSUER}
+      ENCRYPTION_KEY: ${POCKET_ID_ENCRYPTION_KEY:?generate the identity encryption key}
+      STATIC_API_KEY: ${POCKET_ID_STATIC_API_KEY:?generate the identity setup key}
+      TRUST_PROXY: "true"
+      ALLOW_USER_SIGNUPS: disabled
+      AUTO_CREATE_OIDC_CLIENT_SECRET: "false" # pragma: allowlist secret
+      ANALYTICS_DISABLED: "true"
+      VERSION_CHECK_DISABLED: "true"
+      ICON_LIBRARY_URL: disabled
+    volumes: [identity:/app/data]
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=32m,uid=1000,gid=1000,mode=1777"]
+    ports: [127.0.0.1:1411:1411]
+    networks: [backend, edge]
+    depends_on:
+      storage-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, /app/pocket-id, healthcheck]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 2m
+      start_interval: 2s
+
+  identity-setup:
+    image: ${WIKI_HUB_IMAGE:-wiki-hub-local}
+    profiles: [setup]
+    entrypoint: [python, /setup/configure-identity.py]
+    user: "${SETUP_UID:?generate the setup UID}:${SETUP_GID:?generate the setup GID}"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      POCKET_ID_INTERNAL_URL: http://id:1411
+      POCKET_ID_STATIC_API_KEY: ${POCKET_ID_STATIC_API_KEY}
+      WIKI_PUBLIC_URL: ${WIKI_PUBLIC_URL}
+      WIKI_OWNER_USERNAME: ${WIKI_OWNER_USERNAME:?set the existing owner username}
+      WIKI_OWNER_EMAIL: ${WIKI_OWNER_EMAIL:-}
+      OIDC_ISSUER: ${OIDC_ISSUER}
+    volumes:
+      - ./configure-identity.py:/setup/configure-identity.py:ro
+      - ../.setup:/setup-output
+    networks: [backend]
+
+networks:
+  backend: {internal: true}
+  jobs: {internal: true}
+  edge: {}
+  models: {}
+
+volumes:
+  app: {}
+  workspaces: {}
+  git-data: {}
+  git-config: {}
+  identity: {}

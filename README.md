@@ -1,0 +1,157 @@
+# wiki-hub
+
+A small knowledge service built on Forgejo 17, Git LFS and Markdown. One application
+provides an authenticated API, MCP tools, ingestion jobs and the `wiki` CLI.
+Original documents and accepted pages live in private Git repositories. Search is
+rebuildable. Ordinary ingests save automatically with source references and history.
+
+The configured owner creates new wikis and can share each one explicitly with other
+signed-in people. Authentication uses an external OAuth provider; the deployment
+supplies the owner's immutable subject identifier. New identities see no wikis.
+Migration of existing knowledge is a separate step.
+
+## Start here
+
+- [Self-hosting](docs/self-hosting.md): a standalone Compose example with Forgejo
+  17, Pocket ID and a restricted model worker.
+- [Clients](docs/clients.md): CLI, local MCP, hosted Claude/ChatGPT and agents.
+- [Model worker](docs/ingest-runner.md): bring a compatible model endpoint or use
+  an existing trusted sandbox.
+- [Operations](docs/operations.md): consistent backup, populated restore and upgrades.
+- [Security](SECURITY.md) and [contributing](CONTRIBUTING.md).
+
+The bundled worker returns source-backed file edits without executing model
+tools or commands. It makes one configured model request per ingest; provider
+failures remain visible rather than triggering an automatic paid retry.
+
+```mermaid
+flowchart LR
+    Clients[CLI and MCP clients] --> Hub[Wiki Hub API and control plane]
+    Identity[Identity provider] --> Hub
+    Hub --> Git[Forgejo 17 and Git LFS]
+    Hub --> Worker[Isolated ingest worker]
+    Worker --> Model[Configured model endpoint]
+```
+
+## Development
+
+Python 3.12+, Git and Git LFS are required. Run `make check`. Integration tests use
+temporary repositories and a fake sandbox; they never contact a production wiki.
+
+## Usage
+
+Install with `uv tool install .`, then:
+
+```sh
+wiki --server https://knowledge.example.org login
+wiki create starter --title "Starter wiki"
+wiki contribute starter ./source.pdf
+wiki status JOB_ID
+wiki search starter "a question"
+wiki read starter wiki/index.md
+wiki docs get starter raw/SOURCE.pdf --output ./source.pdf
+wiki clone starter ./starter
+wiki sync ./starter
+wiki log starter
+wiki rollback starter COMMIT
+wiki whoami
+wiki share starter RECIPIENT_SUBJECT --role read
+wiki access starter
+wiki unshare starter RECIPIENT_SUBJECT
+wiki share starter TRUSTED_ADMIN_SUBJECT --role admin
+wiki settings starter --local-copies deny
+wiki user set RECIPIENT_SUBJECT --local-copies deny
+```
+
+For a local MCP client, configure `wiki mcp` after signing in. The remote streamable
+HTTP endpoint is `/mcp`; OAuth resource metadata is published at
+`/.well-known/oauth-protected-resource/mcp`. Tools return source paths and Git revisions.
+
+Windows stores credentials in its credential manager. On headless Unix, the CLI can
+use an owner-only configuration directory when no OS keyring is available. Git
+credentials are narrowly scoped and never embedded in remote URLs or printed.
+Large Windows sign-in records use multiple credential-manager entries to respect
+its per-entry size limit. Refresh saves a new complete record before replacing the
+previous one; credentials are never written to a plaintext Windows settings file.
+CI checks login and refresh with synthetic tokens on native Windows.
+
+Local copies start with Markdown and Git LFS pointers. To retrieve an original PDF
+or other source, use its cited `raw/` path with `wiki docs get` and choose a new
+output file. Downloads use the current sign-in, refresh it when needed, and remove
+incomplete files after a failed transfer. Existing output files are never replaced.
+
+Recipients obtain their exact sign-in subject with `wiki whoami`. A `read` grant
+allows retrieval and `wiki clone --read-only`. `contribute` also allows sources to
+be ingested automatically. `write` also allows writable Git copies and rollback.
+The wiki owner and its explicitly delegated admins manage shares and the wiki's
+copy policy. A wiki admin gets no access to other wikis or global user settings.
+Only the configured owner changes a person's copy setting. Every API/MCP operation checks the current
+grant; the local copy's Git account has the same repository permission in Forgejo.
+Removing a share stops subsequent API, Git and LFS access. Existing downloaded
+content and transfers already in progress cannot be recalled.
+
+If Forgejo is unavailable during a permission change, API access for that share is
+denied and `wiki access` shows `pending: 1`. Git may retain its previous permission
+until Forgejo recovers. Repeat the same share/unshare command to finish; do not
+treat a failed permission command as successful revocation. This state survives
+restarts. Groups, invitations and expiring shares are later steps.
+
+Git copies require both the person's and the wiki's local-copy settings to allow
+them. Both default to allow for existing installations. `wiki settings WIKI`
+and `wiki user set SUBJECT` without a flag show the current setting and whether
+its backend update is pending. Disabling copies revokes previously issued managed
+Git tokens for that repository, including its owner's tokens, and removes direct
+repository membership where applicable. API/MCP reading and source downloads
+remain available to authorized readers. A failed change stays pending and denies
+new copy credentials; repeat it to finish after Forgejo recovers. Re-enabling
+copies permits a fresh clone; old revoked tokens do not become valid again.
+These settings control supported Git copies; readers can save content they receive
+and completed downloads or previously issued download links cannot be recalled.
+
+`wiki sync` on a new read-only clone fetches updates without committing or pushing
+local edits. Local edits stay on the computer. Git stops when an update would
+overwrite them or when the local branch has diverged. Writable clones keep the
+normal commit/merge/push workflow and stop for unresolved conflicts.
+
+The configured owner can register a separate agent credential:
+
+```sh
+wiki agent add source-filer --directory ./source-filer-config
+wiki share starter agent:RETURNED_ID --role contribute
+wiki agent list
+wiki agent revoke agent:RETURNED_ID
+```
+
+Registration saves the credential into the agent's new private CLI configuration
+and prints only metadata. Point that agent's CLI or `wiki mcp` process at the
+returned directory with `WIKI_CONFIG_DIR`; it contains no human OAuth credential.
+Use a separate process/account or a limited filesystem mount when handing it to
+another runtime. The server stores only a hash of the revocable key. Keys remain
+valid until revoked; register a replacement to rotate one.
+
+Agents start with no wikis and need explicit `read` or `contribute` grants. They
+cannot receive write/admin access, create wikis, manage shares, obtain Git
+credentials or roll back content. Their effective access also requires their
+owner's current wiki grant. Revocation is checked by the API and on every MCP
+operation, including sessions already connected. An unfinished ingest cannot
+publish after its agent is revoked. A publication already underway is allowed
+to finish before revocation returns.
+
+## Operations
+
+The server requires `WIKI_PUBLIC_URL`, `OIDC_ISSUER`, `WIKI_OIDC_CLIENT_ID`,
+`WIKI_OWNER_SUBJECT`, `FORGEJO_URL`, `FORGEJO_PUBLIC_URL`, `FORGEJO_USERNAME`,
+`FORGEJO_PASSWORD` and `WIKI_INGEST_URL`. `OIDC_JWKS_URL` may point to the provider's
+internal key endpoint; token issuer and audience checks still use the public URLs.
+`WIKI_STATE_DIR` and `WIKI_WORKSPACE_DIR` contain persistent state and working copies.
+Run one application worker. Ingests are serialized per wiki.
+
+`/health` reports process availability; it does not prove provider access or model
+quality. After deployment, check login, Git/LFS, a real ingest, source-backed retrieval,
+rollback and a populated restore separately. Interrupted jobs remain visible after a
+restart. An indexing failure cannot undo an accepted Git commit.
+
+Back up Forgejo configuration, databases, repositories and LFS together with the
+identity provider and application state. Stop writes while taking a consistent copy,
+then restart before uploading the copy off-site. Rehearse restores on a separate
+instance. Previously downloaded content cannot be revoked remotely.

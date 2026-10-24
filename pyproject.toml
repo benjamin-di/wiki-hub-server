@@ -1,0 +1,50 @@
+[project]
+name = "wiki-hub"
+version = "0.4.0"
+description = "Git-backed knowledge collections for people and agents"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "benjamin-di" }]
+
+dependencies = [
+    "fastmcp==4.1.2",
+    "httpx>=0.28,<0.29",
+    "keyring>=25,<26",
+    "uvicorn>=0.35",
+]
+
+[project.urls]
+Repository = "https://github.com/benjamin-di/wiki-hub-server"
+Issues = "https://github.com/benjamin-di/wiki-hub-server/issues"
+
+[project.scripts]
+wiki = "wiki_hub.cli:main"
+wiki-hub = "wiki_hub.server:main"
+wiki-runner = "wiki_hub.runner:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.14"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wiki_hub"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/.github", "/publish", "/.gitattributes"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]

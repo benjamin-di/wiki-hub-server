@@ -1,0 +1,14 @@
+.venv/
+.artifacts/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+dist/
+*.egg-info/
+.env
+.env.*
+!.env.example
+.setup/
+state/
+workspaces/

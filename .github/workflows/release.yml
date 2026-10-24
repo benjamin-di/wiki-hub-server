@@ -82,13 +82,22 @@ jobs:
               --build-arg SOURCE_URL="https://github.com/$GITHUB_REPOSITORY" .
           fi
           digest=$(docker buildx imagetools inspect "$candidate" --format '{{json .Manifest}}' | jq -er '.digest')
+          manifest=$(docker buildx imagetools inspect "$IMAGE@$digest" --raw)
           for architecture in amd64 arm64; do
-            docker pull --platform "linux/$architecture" "$IMAGE@$digest"
-            revision=$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE@$digest")
+            platform_digest=$(jq -er --arg architecture "$architecture" '
+              [.manifests[] | select(.platform.os == "linux" and .platform.architecture == $architecture) | .digest]
+              | if length == 1 then .[0] else error("expected exactly one platform manifest") end
+            ' <<< "$manifest")
+            platform_image="$IMAGE@$platform_digest"
+            # Classic Docker storage cannot replace one index digest with a
+            # second architecture. Distinct child digests also bind each smoke.
+            docker pull --platform "linux/$architecture" "$platform_image"
+            [ "$(docker image inspect -f '{{.Architecture}}' "$platform_image")" = "$architecture" ]
+            revision=$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$platform_image")
             [ "$revision" = "$GITHUB_SHA" ]
             docker run --rm --platform "linux/$architecture" --network none --read-only \
               --tmpfs /data:uid=1001,gid=1001 --tmpfs /workspaces:uid=1001,gid=1001 \
-              --entrypoint python "$IMAGE@$digest" -c '
+              --entrypoint python "$platform_image" -c '
           from pathlib import Path
           from starlette.testclient import TestClient
           from wiki_hub.config import Settings
@@ -105,9 +114,9 @@ jobs:
             assert metadata["authorization_servers"]==[settings.oidc_issuer]
           '
             docker run --rm --platform "linux/$architecture" --network none --read-only \
-              --entrypoint wiki-runner "$IMAGE@$digest" --help
+              --entrypoint wiki-runner "$platform_image" --help
             docker run --rm --platform "linux/$architecture" --network none --read-only \
-              --entrypoint git "$IMAGE@$digest" lfs version
+              --entrypoint git "$platform_image" lfs version
           done
           bash scripts/promote-image.sh "$IMAGE" "$digest" "${GITHUB_REF_NAME#v}"
           docker buildx imagetools create --prefer-index=false --tag "$IMAGE:latest" "$IMAGE@$digest"

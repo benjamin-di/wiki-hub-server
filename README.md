@@ -187,4 +187,6 @@ restart. An indexing failure cannot undo an accepted Git commit.
 Back up Forgejo configuration, databases, repositories and LFS together with the
 identity provider and application state. Stop writes while taking a consistent copy,
 then restart before uploading the copy off-site. Rehearse restores on a separate
-instance. Previously downloaded content cannot be revoked remotely.
+instance. API and MCP reads recheck access after waiting for repository work and
+before returning content, including original-source downloads. Content already
+sent or downloaded cannot be revoked remotely.

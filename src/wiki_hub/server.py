@@ -147,9 +147,11 @@ def create_app(settings=None, service=None, verifier=None):
                     if operation == "settings":
                         return JSONResponse(await service.wiki_settings(caller, wiki))
                     if operation == "document":
-                        row = service.allowed(caller, wiki)
+                        service.allowed(caller, wiki)
                         async with service.lock(wiki):
+                            row = service.allowed(caller, wiki)
                             file = await asyncio.to_thread(service.git.original, row, request.query_params["path"])
+                            service.allowed(caller, wiki)
                         return FileResponse(file, filename=PurePosixPath(request.query_params["path"]).name,
                                             headers={"Cache-Control": "no-store"})
                 if request.method == "POST":

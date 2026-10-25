@@ -324,11 +324,13 @@ class Service:
             return {"slug": slug, "title": wiki["title"], "status": "ready"}
 
     async def pages(self, subject, wiki):
-        row = self.allowed(subject, wiki)
+        self.allowed(subject, wiki)
         async with self.lock(wiki):
+            row = self.allowed(subject, wiki)
             repo = await asyncio.to_thread(self.git.sync, row)
             paths = await asyncio.to_thread(self.git.list_files, repo)
             revision = await asyncio.to_thread(self.git.revision, repo)
+            self.allowed(subject, wiki)
         return {
             "wiki": wiki,
             "revision": revision,
@@ -336,27 +338,30 @@ class Service:
         }
 
     async def read_page(self, subject, wiki, path):
-        row = self.allowed(subject, wiki)
+        self.allowed(subject, wiki)
         path = content_path(path)
         if not path.endswith((".md", ".txt", ".json", ".yaml", ".yml", ".csv")) or path.startswith("raw/"):
             raise ContentError("Read an extracted reference or wiki page; download originals with Git LFS.")
         async with self.lock(wiki):
+            row = self.allowed(subject, wiki)
             repo = await asyncio.to_thread(self.git.sync, row)
             text = (await asyncio.to_thread(self.git.read, repo, path)).decode("utf-8")
             revision = await asyncio.to_thread(self.git.revision, repo)
+            self.allowed(subject, wiki)
         # The first release permits full bounded pages; callers can search for relevant passages.
         if len(text) > 2_000_000:
             raise ContentError("Use search to retrieve passages from this large source.")
         return {"wiki": wiki, "path": path, "revision": revision, "content": text}
 
     async def search(self, subject, wiki, query, limit=10):
-        row = self.allowed(subject, wiki)
+        self.allowed(subject, wiki)
         if not isinstance(query, str) or not 1 <= len(query) <= 500 or not 1 <= int(limit) <= 30:
             raise ContentError("Provide a search query and a limit from 1 to 30.")
         terms = re.findall(r"\w+", query.casefold())
         if not terms:
             return {"wiki": wiki, "results": []}
         async with self.lock(wiki):
+            row = self.allowed(subject, wiki)
             repo = await asyncio.to_thread(self.git.sync, row)
             revision = await asyncio.to_thread(self.git.revision, repo)
             files = await asyncio.to_thread(self.git.list_files, repo)
@@ -382,6 +387,7 @@ class Service:
                         "snippet": "\n".join(lines[start : start + 10])[:2000],
                     }
                 )
+            self.allowed(subject, wiki)
         results.sort(key=lambda item: (-item["score"], item["path"]))
         return {"wiki": wiki, "revision": revision, "results": results[: int(limit)]}
 
@@ -525,9 +531,12 @@ class Service:
         return self.state.public_job(jobid)
 
     async def history(self, subject, wiki):
-        row = self.allowed(subject, wiki)
+        self.allowed(subject, wiki)
         async with self.lock(wiki):
-            return await asyncio.to_thread(self.git.history, row)
+            row = self.allowed(subject, wiki)
+            result = await asyncio.to_thread(self.git.history, row)
+            self.allowed(subject, wiki)
+            return result
 
     async def rollback(self, subject, wiki, revision):
         async with self.write_lock(wiki), self.access_lock(wiki), self.lock(wiki):

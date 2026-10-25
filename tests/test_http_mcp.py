@@ -1,6 +1,9 @@
 import asyncio
 import base64
+import threading
 
+import httpx
+import pytest
 from fastmcp import Client
 from fastmcp.server.auth import AccessToken, TokenVerifier
 from starlette.testclient import TestClient
@@ -19,6 +22,53 @@ class FixtureVerifier(TokenVerifier):
             return AccessToken(token=token, client_id="test-cli", subject=subject,
                                scopes=["wiki:access"], claims={"sub": subject})
         return None
+
+
+@pytest.mark.parametrize("waiting", ["lock", "download"])
+async def test_original_download_rechecks_access_after_waiting(settings, service, monkeypatch, tmp_path, waiting):
+    await service.create("owner", "starter", "Starter")
+    await service.share("owner", "starter", "stranger", "read")
+    original = tmp_path / "original.txt"
+    original.write_text("Private synthetic original")
+    initial_check = asyncio.Event()
+    entered, release = threading.Event(), threading.Event()
+    allowed = service.allowed
+
+    def observed(subject, *args, **kwargs):
+        result = allowed(subject, *args, **kwargs)
+        if subject == "stranger":
+            initial_check.set()
+        return result
+
+    def download(*args):
+        entered.set()
+        if waiting == "download":
+            assert release.wait(10), "test did not release download"
+        return original
+
+    monkeypatch.setattr(service, "allowed", observed)
+    monkeypatch.setattr(service.git, "original", download)
+    if waiting == "lock":
+        await service.lock("starter").acquire()
+    app = create_app(settings, service, FixtureVerifier())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="https://wiki.example.test") as client:
+        request = asyncio.create_task(client.get("/api/wikis/starter/document?path=raw/original.txt",
+                                                headers={"Authorization": "Bearer stranger-token"}))
+        try:
+            await asyncio.wait_for(initial_check.wait(), 5)
+            if waiting == "download":
+                assert await asyncio.to_thread(entered.wait, 5)
+            await service.share("owner", "starter", "stranger", "none")
+        finally:
+            if waiting == "lock":
+                service.lock("starter").release()
+            release.set()
+        response = await asyncio.wait_for(request, 10)
+    assert response.status_code == 403
+    assert "Private synthetic original" not in response.text
+    if waiting == "lock":
+        assert not entered.is_set()
 
 
 def test_http_auth_discovery_and_denied_paths(settings, service):

@@ -18,6 +18,7 @@ Migration of existing knowledge is a separate step.
 - [Model worker](docs/ingest-runner.md): bring a compatible model endpoint or use
   an existing trusted sandbox.
 - [Operations](docs/operations.md): consistent backup, populated restore and upgrades.
+- [Roadmap](docs/roadmap.md): managed sync, agent integration and deterministic import.
 - [Security](SECURITY.md) and [contributing](CONTRIBUTING.md).
 
 The bundled worker returns source-backed file edits without executing model
@@ -112,6 +113,13 @@ and completed downloads or previously issued download links cannot be recalled.
 local edits. Local edits stay on the computer. Git stops when an update would
 overwrite them or when the local branch has diverged. Writable clones keep the
 normal commit/merge/push workflow and stop for unresolved conflicts.
+
+Use `wiki sync --all --root ~/Wikis --json` to synchronize the managed copies
+directly inside a folder. Each copy uses its own saved server/credential, current
+copy permission and OS lock. Other repositories are skipped. A failed copy does
+not prevent the others from being checked, and the command returns failure if
+any copy fails. Automatic discovery/cloning of new wikis remains separate work.
+See [device sync](docs/clients.md#device-sync) for schedulers, exclusions and WSL.
 
 The configured owner can register a separate agent credential:
 

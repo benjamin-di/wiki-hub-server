@@ -32,4 +32,4 @@ jobs:
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
       - run: >-
           uv run --locked --python 3.13 pytest tests/test_windows_credentials.py tests/test_credentials.py
-          tests/test_git_auth.py tests/test_cli.py::test_client_askpass_refuses_foreign_lfs_hosts
+          tests/test_git_auth.py tests/test_cli.py tests/test_copy_lock.py

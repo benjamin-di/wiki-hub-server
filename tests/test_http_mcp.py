@@ -35,9 +35,13 @@ def test_http_auth_discovery_and_denied_paths(settings, service):
         assert metadata.json()["authorization_servers"] == [settings.oidc_issuer]
         owner = {"Authorization": "Bearer owner-token"}
         assert client.post("/api/wikis", headers=owner, json={"slug": "starter", "title": "Starter"}).status_code == 201
+        copy_access = client.get("/api/wikis/starter/copy-access", headers=owner)
+        assert copy_access.json() == {"wiki": "starter", "role": "admin", "local_copies": True}
+        assert copy_access.headers["Cache-Control"] == "no-store"
         stranger = {"Authorization": "Bearer stranger-token"}
         assert client.get("/api/wikis", headers=stranger).json() == []
-        for path in ("pages", "page?path=wiki/index.md", "search?q=source", "history", "document?path=raw/x"):
+        for path in ("pages", "page?path=wiki/index.md", "search?q=source", "history", "copy-access",
+                     "document?path=raw/x"):
             assert client.get("/api/wikis/starter/" + path, headers=stranger).status_code == 403
         assert client.post("/api/wikis/starter/clone", headers=stranger, json={}).status_code == 403
         assert client.get("/api/wikis/starter/page?path=../secret", headers=owner).status_code == 400

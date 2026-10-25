@@ -16,7 +16,19 @@ from wiki_hub import cli
 @pytest.fixture
 def store(tmp_path):
     instance = cli.CredentialStore(tmp_path / "settings")
-    instance.keyring = None
+    class MemoryKeyring:
+        values = {}
+
+        def get_password(self, service, name):
+            return self.values.get((service, name))
+
+        def set_password(self, service, name, value):
+            self.values[service, name] = value
+
+        def delete_password(self, service, name):
+            self.values.pop((service, name), None)
+
+    instance.keyring = MemoryKeyring()
     return instance
 
 
@@ -193,7 +205,7 @@ def git(directory, *arguments):
 
 
 @pytest.fixture
-def copies(tmp_path, store):
+def copies(tmp_path, store, monkeypatch):
     remote = tmp_path / "remote.git"
     remote.mkdir()
     git(remote, "init", "--bare", "--initial-branch=main")
@@ -211,7 +223,15 @@ def copies(tmp_path, store):
     git(tmp_path, "clone", str(remote), str(local))
     git(local, "config", "user.name", "Test Reader")
     git(local, "config", "user.email", "reader@example.invalid")
-    store.put(cli.repo_key(local), {"url": remote.as_uri(), "username": "test-user", "token": "secret-repo-token"})
+    git(local, "config", "wikihub.server", "https://wiki.example")
+    git(local, "config", "wikihub.wiki", "pilot")
+    store.put(cli.repo_key(local), {"url": str(remote), "username": "test-user", "token": "secret-repo-token"})
+
+    def policy(self, method, path):
+        assert method == "GET" and path == "/api/wikis/pilot/copy-access"
+        return {"wiki": "pilot", "role": "write", "local_copies": True}
+
+    monkeypatch.setattr(cli.APIClient, "request", policy)
     return remote, writer, local
 
 
@@ -265,6 +285,126 @@ def test_sync_stops_on_conflict_without_pushing(copies, store):
         cli.sync(local, store)
 
 
+def test_sync_keeps_excluded_application_work_local(copies, store):
+    remote, _, local = copies
+    (local / ".autocommit-pathspec").write_text(".\n:(exclude,glob)*.py\n")
+    (local / "held.py").write_text("print('unreleased application')\n")
+    (local / "page.md").write_text("Accepted local knowledge\n")
+    cli.sync(local, store)
+    assert git(remote, "show", "main:page.md") == "Accepted local knowledge"
+    assert "held.py" not in git(remote, "ls-tree", "--name-only", "main").splitlines()
+    assert "held.py" in git(local, "status", "--porcelain")
+    git(local, "add", "held.py")
+    before = git(remote, "rev-parse", "main")
+    with pytest.raises(cli.CLIError, match="staged changes are excluded"):
+        cli.sync(local, store)
+    assert git(remote, "rev-parse", "main") == before
+    assert git(local, "diff", "--cached", "--name-only") == "held.py"
+
+
+def test_sync_installs_local_lfs_filters_and_transfers_original_bytes(copies, store):
+    import hashlib
+
+    remote, _, local = copies
+    original = b"Original binary evidence\x00\xff\x80\n"
+    (local / ".gitattributes").write_text("raw/** filter=lfs diff=lfs merge=lfs -text\n")
+    (local / "raw").mkdir()
+    (local / "raw/source.bin").write_bytes(original)
+    cli.sync(local, store)
+    oid = hashlib.sha256(original).hexdigest()
+    assert f"oid sha256:{oid}" in git(remote, "show", "main:raw/source.bin")
+    assert (remote / "lfs/objects" / oid[:2] / oid[2:4] / oid).read_bytes() == original
+    assert (local / "raw/source.bin").read_bytes() == original
+
+
+def test_sync_uses_current_role_without_upgrading_a_read_only_copy(copies, store, monkeypatch):
+    remote, _, local = copies
+    monkeypatch.setattr(cli.APIClient, "request", lambda *a: {"role": "read", "local_copies": True})
+    before = git(remote, "rev-parse", "main")
+    (local / "local.md").write_text("Local edits remain local after a downgrade\n")
+    assert cli.sync(local, store) == "read-only"
+    assert git(local, "rev-parse", "HEAD") == before
+    assert "local.md" in git(local, "status", "--porcelain")
+    assert git(remote, "rev-parse", "main") == before
+
+
+@pytest.mark.parametrize("response", [{"role": "write", "local_copies": False}, {"local_copies": True}])
+def test_denied_or_invalid_copy_policy_does_not_commit_local_work(copies, store, monkeypatch, response):
+    remote, _, local = copies
+    monkeypatch.setattr(cli.APIClient, "request", lambda *a: response)
+    (local / "local.md").write_text("Do not publish without fresh permission\n")
+    before = git(local, "rev-parse", "HEAD")
+    with pytest.raises(cli.CLIError, match="Local work was preserved"):
+        cli.sync(local, store)
+    assert git(local, "rev-parse", "HEAD") == git(remote, "rev-parse", "main") == before
+    assert git(local, "diff", "--cached", "--name-only") == ""
+
+
+def test_sync_does_not_publish_to_a_changed_push_remote(copies, store):
+    remote, _, local = copies
+    before = git(remote, "rev-parse", "main")
+    git(local, "config", "remote.origin.pushurl", str(remote.parent / "different.git"))
+    (local / "local.md").write_text("Preserve work\n")
+    with pytest.raises(cli.CLIError, match="remote differs"):
+        cli.sync(local, store)
+    assert git(local, "rev-parse", "HEAD") == before
+    assert git(local, "diff", "--cached", "--name-only") == ""
+
+
+def test_sync_stops_during_a_rebase_or_on_a_different_branch(copies, store):
+    _, _, local = copies
+    state = local / ".git/rebase-merge"
+    state.mkdir()
+    try:
+        with pytest.raises(cli.CLIError, match="existing Git operation"):
+            cli.sync(local, store)
+    finally:
+        state.rmdir()
+    git(local, "switch", "-c", "unrelated-work")
+    with pytest.raises(cli.CLIError, match="on main tracking"):
+        cli.sync(local, store)
+
+
+def test_manual_sync_uses_the_same_lock_as_a_scheduled_run(copies, store):
+    from wiki_hub.copy_lock import copy_lock
+
+    _, _, local = copies
+    with copy_lock(local / ".git/wiki-hub-sync.lock"):
+        with pytest.raises(cli.CLIError, match="Another wiki sync"):
+            cli.sync(local, store)
+    assert cli.sync(local, store) == "synced"
+
+
+def test_batch_sync_reports_each_failure_and_still_updates_other_copies(copies, store, monkeypatch, capsys):
+    remote, _, local = copies
+    broken = local.parent / "a-incomplete-copy"
+    git(local.parent, "clone", str(remote), str(broken))
+    git(broken, "config", "wikihub.server", "https://wiki.example")
+    (local / "local.md").write_text("Batch sync must reach this copy\n")
+    monkeypatch.setattr(cli, "CredentialStore", lambda: store)
+    assert cli.main(["sync", "--all", "--root", str(local.parent), "--json"]) == 1
+    output = capsys.readouterr()
+    report = json.loads(output.out)
+    assert report["ok"] is False
+    assert [(Path(row["directory"]).name, row["status"]) for row in report["copies"]] == [
+        (broken.name, "failed"), (local.name, "synced")]
+    assert git(remote, "show", "main:local.md") == "Batch sync must reach this copy"
+    assert "secret-repo-token" not in output.out + output.err
+
+
+def test_batch_sync_ignores_unmanaged_repos_and_does_not_need_a_default_server(copies, store, monkeypatch, capsys):
+    remote, _, local = copies
+    unmanaged = local.parent / "ordinary-repository"
+    git(local.parent, "clone", str(remote), str(unmanaged))
+    (unmanaged / "do-not-commit.md").write_text("Managed elsewhere\n")
+    monkeypatch.setattr(cli, "CredentialStore", lambda: store)
+    assert cli.main(["sync", "--all", "--root", str(local.parent), "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["ok"] and len(report["copies"]) == 1
+    assert git(unmanaged, "diff", "--cached", "--name-only") == ""
+    assert "do-not-commit.md" in git(unmanaged, "status", "--porcelain")
+
+
 def test_git_credentials_use_ephemeral_askpass_not_arguments(tmp_path, monkeypatch):
     observed = {}
 
@@ -281,6 +421,16 @@ def test_git_credentials_use_ephemeral_askpass_not_arguments(tmp_path, monkeypat
     assert "secret-repo-token" not in " ".join(observed["arguments"])
     assert observed["env"]["WIKI_GIT_TOKEN"] == "secret-repo-token"
     assert not Path(observed["env"]["GIT_ASKPASS"]).exists()
+
+
+def test_timed_out_git_returns_a_safe_error_for_batch_reporting(tmp_path, monkeypatch):
+    def timeout(arguments, **kwargs):
+        raise subprocess.TimeoutExpired(arguments, kwargs["timeout"], stderr="private diagnostic")
+
+    monkeypatch.setattr(cli.subprocess, "run", timeout)
+    with pytest.raises(cli.CLIError, match="Git timed out") as error:
+        cli.git_run(["fetch", "origin"], tmp_path)
+    assert "private diagnostic" not in str(error.value)
 
 
 def test_client_askpass_refuses_foreign_lfs_hosts(tmp_path, monkeypatch):

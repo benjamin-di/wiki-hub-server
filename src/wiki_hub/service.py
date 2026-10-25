@@ -135,6 +135,12 @@ class Service:
         wiki = self.allowed(subject, slug, "admin")
         return self._access_result(wiki)
 
+    async def copy_access(self, subject, slug):
+        wiki = self.allowed(subject, slug)
+        role = "admin" if wiki["owner"] == subject else self.state.role(subject, slug)
+        return {"wiki": slug, "role": role,
+                "local_copies": not subject.startswith("agent:") and self.state.copies_allowed(subject, slug)}
+
     def _access_result(self, wiki):
         return {"wiki": wiki["slug"], "owner": wiki["owner"], "grants": self.state.grants(wiki["slug"]),
                 **self.state.copy_setting("wiki", wiki["slug"])}

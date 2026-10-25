@@ -131,6 +131,9 @@ def create_app(settings=None, service=None, verifier=None):
                         return JSONResponse(await service.history(caller, wiki))
                     if operation == "access":
                         return JSONResponse(await service.access(caller, wiki))
+                    if operation == "copy-access":
+                        return JSONResponse(await service.copy_access(caller, wiki),
+                                            headers={"Cache-Control": "no-store"})
                     if operation == "settings":
                         return JSONResponse(await service.wiki_settings(caller, wiki))
                     if operation == "document":

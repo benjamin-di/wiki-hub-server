@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shlex
 import stat
 import subprocess
@@ -20,6 +21,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+
+from .copy_lock import CopyBusyError, copy_lock
 
 WINDOWS = os.name == "nt"
 
@@ -397,13 +400,20 @@ def git_run(
                 WIKI_GIT_ALLOWED_URLS=json.dumps([credentials["url"]]),
             )
         environment["GIT_LFS_SKIP_SMUDGE"] = "1"
-        result = subprocess.run(
-            ["git", "-c", "credential.helper=", *arguments],
-            cwd=directory,
-            env=environment,
-            text=True,
-            capture_output=True,
-        )
+        try:
+            result = subprocess.run(
+                ["git", "-c", "credential.helper=", "-c", "http.lowSpeedLimit=1000",
+                 "-c", "http.lowSpeedTime=30", *arguments],
+                cwd=directory,
+                env=environment,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                timeout=600,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise CLIError("Git timed out. Local work was preserved; inspect the remote before retrying.") from exc
     if check and result.returncode:
         detail = result.stderr.strip() or result.stdout.strip()
         if credentials:
@@ -414,23 +424,47 @@ def git_run(
 
 def clone(client: APIClient, wiki: str, directory: Path, *, read_only: bool = False) -> None:
     target = directory.expanduser().resolve()
+    if target.exists() and (not target.is_dir() or any(target.iterdir())):
+        raise CLIError("Choose an empty directory for the local copy.")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    git_run(["lfs", "version"], target.parent)
     credentials = client.request("POST", f"/api/wikis/{wiki}/clone", json={"write": not read_only})
     parsed = urlsplit(credentials["url"])
     if parsed.scheme not in {"https", "http"} or parsed.username or parsed.password:
         raise CLIError("The server returned an invalid Git URL.")
-    if target.exists() and (not target.is_dir() or any(target.iterdir())):
-        raise CLIError("Choose an empty directory for the local copy.")
-    target.parent.mkdir(parents=True, exist_ok=True)
     git_run(["clone", credentials["url"], str(target)], target.parent, credentials)
+    git_run(["lfs", "install", "--local", "--skip-smudge"], target)
     client.store.put(repo_key(target), credentials)
     git_run(["config", "wikihub.server", client.server], target)
     git_run(["config", "wikihub.wiki", wiki], target)
     print(f"Local copy ready: {target}")
 
 
-def sync(directory: Path, store: CredentialStore) -> None:
+def copy_metadata(directory: Path) -> tuple[str, str]:
+    server = git_run(["config", "--local", "--get", "wikihub.server"], directory, check=False).stdout.strip()
+    wiki = git_run(["config", "--local", "--get", "wikihub.wiki"], directory, check=False).stdout.strip()
+    parsed = urlsplit(server)
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password
+            or parsed.query or parsed.fragment or not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", wiki)):
+        raise CLIError("This copy has incomplete Wiki Hub metadata. Repair it or create a new wiki clone.")
+    return server.rstrip("/"), wiki
+
+
+def sync(directory: Path, store: CredentialStore, *, quiet: bool = False) -> str:
     directory = directory.expanduser().resolve()
     root = Path(git_run(["rev-parse", "--show-toplevel"], directory).stdout.strip())
+    lock_path = Path(git_run(["rev-parse", "--git-path", "wiki-hub-sync.lock"], root).stdout.strip())
+    if not lock_path.is_absolute():
+        lock_path = root / lock_path
+    try:
+        with copy_lock(lock_path):
+            return _sync_copy(root, store, quiet=quiet)
+    except CopyBusyError as exc:
+        raise CLIError(str(exc)) from exc
+
+
+def _sync_copy(root: Path, store: CredentialStore, *, quiet: bool) -> str:
+    server, wiki = copy_metadata(root)
     credentials = store.get(repo_key(root))
     if not credentials:
         raise CLIError("This copy has no saved wiki credential. Create it with wiki clone.")
@@ -438,12 +472,40 @@ def sync(directory: Path, store: CredentialStore) -> None:
         raise CLIError("Resolve the existing merge conflicts before running wiki sync.")
     if git_run(["rev-parse", "--verify", "MERGE_HEAD"], root, check=False).returncode == 0:
         raise CLIError("Finish or abort the existing merge before running wiki sync.")
-    if credentials.get("write", True) is False:
+    for state in ("rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer"):
+        state_path = Path(git_run(["rev-parse", "--git-path", state], root).stdout.strip())
+        if (root / state_path).exists():
+            raise CLIError("Finish the existing Git operation before running wiki sync.")
+    if (git_run(["symbolic-ref", "--quiet", "--short", "HEAD"], root, check=False).stdout.strip() != "main"
+            or git_run(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], root,
+                       check=False).stdout.strip() != "origin/main"):
+        raise CLIError("A managed wiki copy must be on main tracking origin/main.")
+    for arguments in (["remote", "get-url", "--all", "origin"], ["remote", "get-url", "--push", "--all", "origin"]):
+        if git_run(arguments, root).stdout.strip().splitlines() != [credentials["url"]]:
+            raise CLIError("This copy's Git remote differs from its saved wiki credential. Repair it before syncing.")
+    policy = APIClient(server, store).request("GET", f"/api/wikis/{wiki}/copy-access")
+    if policy.get("local_copies") is not True:
+        raise CLIError("Local copies are disabled or awaiting a permission update. Local work was preserved.")
+    if policy.get("role") not in {"read", "contribute", "write", "admin"}:
+        raise CLIError("The server returned an invalid copy permission. Local work was preserved.")
+    if (root / ".gitattributes").is_file():
+        git_run(["lfs", "install", "--local", "--skip-smudge"], root)
+    if credentials.get("write", True) is False or policy["role"] not in {"write", "admin"}:
         git_run(["fetch", "origin"], root, credentials)
         git_run(["merge", "--ff-only", "@{upstream}"], root)
-        print("Read-only local copy updated; local edits remain on this computer.")
-        return
-    git_run(["add", "-A"], root)
+        if not quiet:
+            print("Read-only local copy updated; local edits remain on this computer.")
+        return "read-only"
+    pathspec = root / ".autocommit-pathspec"
+    patterns = ([line.strip() for line in pathspec.read_text(encoding="utf-8").splitlines()
+                 if line.strip() and not line.lstrip().startswith("#")] if pathspec.exists() else ["."])
+    if not patterns:
+        raise CLIError("The autocommit path list is empty. Configure the permitted paths before syncing.")
+    staged = git_run(["diff", "--cached", "--name-only", "-z"], root).stdout
+    included = git_run(["diff", "--cached", "--name-only", "-z", "--", *patterns], root).stdout
+    if staged != included:
+        raise CLIError("Some staged changes are excluded from wiki sync. Unstage or commit them explicitly first.")
+    git_run(["add", "--all", "--", *patterns], root)
     changes = git_run(["diff", "--cached", "--quiet"], root, check=False)
     if changes.returncode == 1:
         git_run(["commit", "-m", "Update wiki from local copy"], root)
@@ -451,8 +513,32 @@ def sync(directory: Path, store: CredentialStore) -> None:
         raise CLIError("Git could not inspect the staged changes.")
     git_run(["fetch", "origin"], root, credentials)
     git_run(["merge", "--no-edit", "@{upstream}"], root, credentials)
-    git_run(["push"], root, credentials)
-    print("Local copy synced.")
+    git_run(["push", "origin", "HEAD:main"], root, credentials)
+    if not quiet:
+        print("Local copy synced.")
+    return "synced"
+
+
+def sync_all(root: Path, store: CredentialStore) -> list[dict[str, Any]]:
+    root = root.expanduser().resolve()
+    if not root.is_dir():
+        raise CLIError("Choose an existing folder containing managed wiki copies.")
+    results = []
+    for directory in sorted(root.iterdir()):
+        if directory.is_symlink() or not directory.is_dir() or not (directory / ".git").exists():
+            continue
+        marked = git_run(["config", "--local", "--get-regexp", r"^wikihub\.(server|wiki)$"],
+                         directory, check=False)
+        if marked.returncode == 1:  # Ordinary repositories belong to the operator's Git sync.
+            continue
+        result = {"directory": str(directory)}
+        try:
+            _, result["wiki"] = copy_metadata(directory)
+            result["status"] = sync(directory, store, quiet=True)
+        except (CLIError, httpx.HTTPError, OSError, ValueError, KeyError) as exc:
+            result.update(status="failed", error=str(exc))
+        results.append(result)
+    return results
 
 
 def parser() -> argparse.ArgumentParser:
@@ -513,7 +599,10 @@ def parser() -> argparse.ArgumentParser:
     local.add_argument("directory", type=Path)
     local.add_argument("--read-only", action="store_true", help="Request a read-only repository credential")
     synchronize = sub.add_parser("sync")
-    synchronize.add_argument("directory", nargs="?", type=Path, default=Path.cwd())
+    synchronize.add_argument("directory", nargs="?", type=Path)
+    synchronize.add_argument("--all", action="store_true", help="Sync managed copies directly inside --root")
+    synchronize.add_argument("--root", type=Path, help="Folder containing existing managed copies")
+    synchronize.add_argument("--json", action="store_true", help="Print structured results for batch sync")
     history = sub.add_parser("log")
     history.add_argument("wiki")
     rollback = sub.add_parser("rollback")
@@ -530,7 +619,22 @@ def main(argv: list[str] | None = None) -> int:
         if store.agent() and args.command in ("login", "agent", "sync"):
             raise CLIError("Use your human sign-in configuration for login, agent management or Git copies.")
         if args.command == "sync":
-            sync(args.directory, store)
+            if args.all:
+                if args.directory is not None or args.root is None:
+                    raise CLIError("Use wiki sync --all --root DIRECTORY for batch synchronization.")
+                results = sync_all(args.root, store)
+                failed = any(row["status"] == "failed" for row in results)
+                if args.json:
+                    print(json.dumps({"copies": results, "ok": not failed}, ensure_ascii=False))
+                else:
+                    for row in results:
+                        print(f"{row['directory']}: {row['status']}" + (f" — {row['error']}" if "error" in row else ""))
+                    if not results:
+                        print("No managed wiki copies found in this folder.")
+                return 1 if failed else 0
+            if args.root is not None or args.json:
+                raise CLIError("--root and --json require wiki sync --all.")
+            sync(args.directory or Path.cwd(), store)
             return 0
         server = args.server or os.environ.get("WIKI_SERVER_URL") or store.server()
         if not server:

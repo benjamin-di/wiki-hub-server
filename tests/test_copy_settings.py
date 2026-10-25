@@ -7,6 +7,27 @@ from wiki_hub.service import Denied
 from wiki_hub.state import State
 
 
+async def test_copy_access_reports_only_current_caller_role_and_effective_copy_policy(service):
+    await service.create("owner", "starter", "Starter")
+    assert await service.copy_access("owner", "starter") == {
+        "wiki": "starter", "role": "admin", "local_copies": True}
+    await service.share("owner", "starter", "reader", "contribute")
+    assert await service.copy_access("reader", "starter") == {
+        "wiki": "starter", "role": "contribute", "local_copies": True}
+    service.state.set_copy_setting("user", "reader", True)
+    assert not (await service.copy_access("reader", "starter"))["local_copies"]
+    service.state.copy_projected("user", "reader")
+    assert (await service.copy_access("reader", "starter"))["local_copies"]
+    agent = await service.add_agent("owner", "Synthetic source filer")
+    await service.share("owner", "starter", agent["id"], "read")
+    assert not (await service.copy_access(agent["id"], "starter"))["local_copies"]
+    await service.share("owner", "starter", "reader", "none")
+    with pytest.raises(Denied):
+        await service.copy_access("reader", "starter")
+    with pytest.raises(Denied):
+        await service.copy_access("unknown", "starter")
+
+
 async def test_copy_policies_control_git_without_removing_mcp_read_access(service, monkeypatch):
     await service.create("owner", "starter", "Starter")
     await service.share("owner", "starter", "reader", "write")

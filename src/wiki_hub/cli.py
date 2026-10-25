@@ -473,7 +473,7 @@ def git_run(
     return result
 
 
-def clone(client: APIClient, wiki: str, directory: Path, *, read_only: bool = False) -> None:
+def clone(client: APIClient, wiki: str, directory: Path, *, read_only: bool = False, quiet: bool = False) -> None:
     target = directory.expanduser().resolve()
     if target.exists() and (not target.is_dir() or any(target.iterdir())):
         raise CLIError("Choose an empty directory for the local copy.")
@@ -488,7 +488,8 @@ def clone(client: APIClient, wiki: str, directory: Path, *, read_only: bool = Fa
     client.store.put(repo_key(target), credentials)
     git_run(["config", "wikihub.server", client.server], target)
     git_run(["config", "wikihub.wiki", wiki], target)
-    print(f"Local copy ready: {target}")
+    if not quiet:
+        print(f"Local copy ready: {target}")
 
 
 def copy_metadata(directory: Path) -> tuple[str, str]:
@@ -592,6 +593,55 @@ def sync_all(root: Path, store: CredentialStore) -> list[dict[str, Any]]:
     return results
 
 
+def discover_copies(root: Path, client: APIClient) -> list[dict[str, Any]]:
+    """Create missing eligible copies only after an explicit discovery request."""
+    root = root.expanduser().resolve()
+    if not root.is_dir():
+        raise CLIError("Choose an existing folder for discovered wiki copies.")
+    results = []
+    try:
+        with file_lock(root / ".wiki-hub-discovery.lock", timeout=0):
+            existing = set()
+            for directory in root.iterdir():
+                if directory.is_symlink() or not directory.is_dir() or not (directory / ".git").exists():
+                    continue
+                try:
+                    existing.add(copy_metadata(directory))
+                except CLIError:
+                    pass  # The ordinary batch pass reports broken managed metadata.
+            catalog = client.request("GET", "/api/wikis")
+            if not isinstance(catalog, list) or any(
+                not isinstance(wiki, dict) or not isinstance(wiki.get("slug"), str)
+                or not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", wiki["slug"]) for wiki in catalog
+            ):
+                raise CLIError("The server returned an invalid wiki name; discovery stopped.")
+            for wiki in catalog:
+                slug = wiki["slug"]
+                if (client.server, slug) in existing:
+                    continue
+                directory = root / slug
+                result = {"directory": str(directory), "wiki": slug}
+                try:
+                    if directory.exists() or directory.is_symlink():
+                        raise CLIError("The destination already exists. Preserve it and choose another copy location.")
+                    policy = client.request("GET", f"/api/wikis/{slug}/copy-access")
+                    if policy.get("local_copies") is not True:
+                        result.update(status="skipped",
+                                      reason="Local copies are disabled or awaiting a permission update.")
+                    elif policy.get("role") not in {"read", "contribute", "write", "admin"}:
+                        raise CLIError("The server returned an invalid copy permission.")
+                    else:
+                        clone(client, slug, directory, read_only=policy["role"] not in {"write", "admin"}, quiet=True)
+                        existing.add((client.server, slug))
+                        result["status"] = "cloned"
+                except (CLIError, httpx.HTTPError, OSError, ValueError, KeyError) as exc:
+                    result.update(status="failed", error=str(exc))
+                results.append(result)
+    except FileLockTimeoutError as exc:
+        raise CLIError("Another discovery is using this folder. Retry after it finishes.") from exc
+    return results
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="wiki", description="Use your wiki-hub wikis.")
     result.add_argument("--server", help="wiki-hub URL (or WIKI_SERVER_URL)")
@@ -655,6 +705,8 @@ def parser() -> argparse.ArgumentParser:
     synchronize = sub.add_parser("sync")
     synchronize.add_argument("directory", nargs="?", type=Path)
     synchronize.add_argument("--all", action="store_true", help="Sync managed copies directly inside --root")
+    synchronize.add_argument("--discover", action="store_true",
+                             help="Also create missing eligible copies from the signed-in server")
     synchronize.add_argument("--root", type=Path, help="Folder containing existing managed copies")
     synchronize.add_argument("--json", action="store_true", help="Print structured results for batch sync")
     history = sub.add_parser("log")
@@ -676,7 +728,21 @@ def main(argv: list[str] | None = None) -> int:
             if args.all:
                 if args.directory is not None or args.root is None:
                     raise CLIError("Use wiki sync --all --root DIRECTORY for batch synchronization.")
+                discovered = []
+                if args.discover:
+                    server = args.server or os.environ.get("WIKI_SERVER_URL") or store.server()
+                    if not server:
+                        raise CLIError("Sign in to a server before discovering wiki copies.")
+                    try:
+                        discovered = discover_copies(args.root, APIClient(server, store))
+                    except (CLIError, httpx.HTTPError, OSError, ValueError, KeyError) as exc:
+                        discovered = [{"directory": str(args.root.expanduser().resolve()),
+                                       "status": "failed", "error": str(exc)}]
                 results = sync_all(args.root, store)
+                # Newly created copies already reflect accepted history. Include their
+                # sync result once, while retaining skipped/failed discovery outcomes.
+                copied = {row["directory"] for row in results}
+                results.extend(row for row in discovered if row["status"] != "cloned" or row["directory"] not in copied)
                 failed = any(row["status"] == "failed" for row in results)
                 if args.json:
                     print(json.dumps({"copies": results, "ok": not failed}, ensure_ascii=False))
@@ -686,8 +752,8 @@ def main(argv: list[str] | None = None) -> int:
                     if not results:
                         print("No managed wiki copies found in this folder.")
                 return 1 if failed else 0
-            if args.root is not None or args.json:
-                raise CLIError("--root and --json require wiki sync --all.")
+            if args.root is not None or args.json or args.discover:
+                raise CLIError("--root, --json and --discover require wiki sync --all.")
             sync(args.directory or Path.cwd(), store)
             return 0
         server = args.server or os.environ.get("WIKI_SERVER_URL") or store.server()

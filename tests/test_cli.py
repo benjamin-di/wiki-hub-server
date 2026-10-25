@@ -405,6 +405,132 @@ def test_batch_sync_ignores_unmanaged_repos_and_does_not_need_a_default_server(c
     assert "do-not-commit.md" in git(unmanaged, "status", "--porcelain")
 
 
+@pytest.mark.parametrize("role,read_only", [("read", True), ("contribute", True), ("write", False), ("admin", False)])
+def test_discovery_clones_once_with_current_role_and_reuses_a_renamed_copy(copies, store, tmp_path, monkeypatch, capsys,
+                                                                         role, read_only):
+    remote, _, _ = copies
+    root = tmp_path / "discovered"
+    root.mkdir()
+    requests = []
+    url = "https://git.example.test/operator/pilot.git"
+
+    def request(self, method, path, **kwargs):
+        requests.append((method, path))
+        if path == "/api/wikis":
+            return [{"slug": "pilot"}]
+        if path.endswith("/copy-access"):
+            return {"wiki": "pilot", "role": role, "local_copies": True}
+        assert path.endswith("/clone") and kwargs["json"] == {"write": not read_only}
+        return {"url": url, "username": "reader", "token": "secret-discovery", "write": not read_only}
+
+    run = cli.git_run
+
+    def local_clone(arguments, directory, credentials=None, **kwargs):
+        if arguments[0] == "clone":
+            assert credentials["write"] is not read_only
+            result = run(["clone", str(remote), arguments[2]], directory)
+            run(["config", "remote.origin.url", url], Path(arguments[2]))
+            return result
+        return run(arguments, directory, credentials, **kwargs)
+
+    monkeypatch.setattr(cli.APIClient, "request", request)
+    monkeypatch.setattr(cli, "git_run", local_clone)
+    client = cli.APIClient("https://wiki.example", store)
+    result = cli.discover_copies(root, client)
+    assert [r["status"] for r in result] == ["cloned"]
+    assert (root / "pilot/notes.md").read_text() == "Opening time: nine\n"
+    assert store.get(cli.repo_key(root / "pilot"))["write"] is not read_only
+    assert cli.copy_metadata(root / "pilot") == (client.server, "pilot")
+    # Metadata, rather than a parallel registry or folder name, is authoritative.
+    (root / "pilot").rename(root / "renamed-local-copy")
+    before = len(requests)
+    assert cli.discover_copies(root, client) == []
+    assert requests[before:] == [("GET", "/api/wikis")]
+    assert not (root / "pilot").exists()
+    assert capsys.readouterr().out == ""
+
+
+def test_discovery_preserves_existing_folders_and_continues_after_a_denial(tmp_path, store, monkeypatch):
+    root = tmp_path / "copies"
+    (root / "occupied").mkdir(parents=True)
+    note = root / "occupied/personal-note.txt"
+    note.write_text("Keep my local work\n")
+    created = []
+
+    def request(self, method, path):
+        assert method == "GET"
+        if path == "/api/wikis":
+            return [{"slug": name} for name in ("occupied", "denied", "disabled", "valid")]
+        if path.endswith("denied/copy-access"):
+            raise cli.CLIError("HTTP 403")
+        return {"role": "read", "local_copies": "/disabled/" not in path}
+
+    monkeypatch.setattr(cli.APIClient, "request", request)
+    monkeypatch.setattr(cli, "clone", lambda _client, slug, directory, **kwargs: created.append((slug, kwargs)))
+    result = cli.discover_copies(root, cli.APIClient("https://wiki.example", store))
+    assert [r["status"] for r in result] == ["failed", "failed", "skipped", "cloned"]
+    assert created == [("valid", {"read_only": True, "quiet": True})]
+    assert note.read_text() == "Keep my local work\n"
+    assert list((root / "occupied").iterdir()) == [note]
+
+
+def test_discovery_does_not_follow_an_existing_destination_symlink(tmp_path, store, monkeypatch):
+    if os.name == "nt":
+        pytest.skip("Unprivileged Windows symlinks require Developer Mode")
+    target = tmp_path / "keep"
+    target.mkdir()
+    root = tmp_path / "copies"
+    root.mkdir()
+    (root / "pilot").symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(cli.APIClient, "request", lambda *_args: [{"slug": "pilot"}])
+    result = cli.discover_copies(root, cli.APIClient("https://wiki.example", store))
+    assert result[0]["status"] == "failed" and "already exists" in result[0]["error"]
+    assert list(target.iterdir()) == []
+
+
+@pytest.mark.parametrize("catalog", [[{"slug": "../escape"}], [{"slug": "pilot"}, {"slug": "BAD"}], [None], {}])
+def test_invalid_discovery_catalog_creates_nothing(tmp_path, store, monkeypatch, catalog):
+    monkeypatch.setattr(cli.APIClient, "request", lambda *_args: catalog)
+    with pytest.raises(cli.CLIError, match="invalid wiki name"):
+        cli.discover_copies(tmp_path, cli.APIClient("https://wiki.example", store))
+    assert not (tmp_path / "pilot").exists()
+
+
+def test_discovery_root_lock_prevents_overlapping_clone_attempts(tmp_path, store, monkeypatch):
+    from wiki_hub.copy_lock import file_lock
+
+    monkeypatch.setattr(cli.APIClient, "request", lambda *_args: pytest.fail("Must lock before requesting a catalog"))
+    with file_lock(tmp_path / ".wiki-hub-discovery.lock"):
+        with pytest.raises(cli.CLIError, match="Another discovery"):
+            cli.discover_copies(tmp_path, cli.APIClient("https://wiki.example", store))
+
+
+def test_failed_discovery_still_syncs_existing_copies_and_returns_valid_json(copies, store, monkeypatch, capsys):
+    remote, _, local = copies
+    original_request = cli.APIClient.request
+
+    def request(self, method, path):
+        if path == "/api/wikis":
+            raise cli.CLIError("HTTP 503")
+        return original_request(self, method, path)
+
+    monkeypatch.setattr(cli.APIClient, "request", request)
+    monkeypatch.setattr(cli, "CredentialStore", lambda: store)
+    store.set_server("https://wiki.example")
+    (local / "local.md").write_text("Offline work survives discovery failure\n")
+    assert cli.main(["sync", "--all", "--discover", "--root", str(local.parent), "--json"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert not report["ok"]
+    assert [r["status"] for r in report["copies"]] == ["synced", "failed"]
+    assert git(remote, "show", "main:local.md") == "Offline work survives discovery failure"
+
+
+def test_discovery_requires_explicit_batch_mode(store, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "CredentialStore", lambda: store)
+    assert cli.main(["sync", "--discover"]) == 1
+    assert "require wiki sync --all" in capsys.readouterr().err
+
+
 def test_git_credentials_use_ephemeral_askpass_not_arguments(tmp_path, monkeypatch):
     observed = {}
 

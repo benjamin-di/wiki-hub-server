@@ -140,7 +140,10 @@ Use `wiki sync --all --root ~/Wikis --json` to synchronize the managed copies
 directly inside a folder. Each copy uses its own saved server/credential, current
 copy permission and OS lock. Other repositories are skipped. A failed copy does
 not prevent the others from being checked, and the command returns failure if
-any copy fails. Automatic discovery/cloning of new wikis remains separate work.
+any copy fails. Add `--discover` to create missing eligible copies from your
+signed-in server first. Readers and contributors get read-only copies. Discovery
+preserves existing folders, skips wikis whose copy policy disallows it and never
+grants access. Without this flag, batch sync only updates existing copies.
 See [device sync](docs/clients.md#device-sync) for schedulers, exclusions and WSL.
 
 The configured owner can register a separate agent credential:

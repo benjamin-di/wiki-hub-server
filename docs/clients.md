@@ -44,7 +44,24 @@ left to their existing Git workflow. A configured default server is unnecessary:
 each copy identifies its own server. Zero copies reports an empty result. Missing
 credentials, incomplete markers, denied policy, conflicts and busy locks produce
 per-copy failures and a nonzero exit status while other copies are still checked.
-No new wikis are automatically cloned by this command.
+Without additional options, no new wikis are cloned.
+
+To opt this device into discovery, sign in to the desired server, then run:
+
+```sh
+wiki sync --all --discover --root ~/Wikis --json
+```
+
+Discovery lists the currently accessible wikis and checks their current copy
+eligibility before requesting each missing clone. Readers and contributors get
+read-only credentials; writers and admins get writable credentials. Disabled
+copy policies are reported as skipped. Unavailable permissions and occupied
+destinations are reported as failures, while other copies are still checked.
+Existing folders and symlinks are never adopted or replaced. Existing managed
+metadata prevents duplicate clones even when a copy uses a different folder
+name. Moving a copy does not transfer its saved credential; repair it explicitly.
+Discovery requires a configured server or `--server URL`, and grants no access.
+Keep the root's discovery lock file; concurrent discovery stops without cloning.
 
 The current copy permission is checked before staging edits. Run against a server
 supporting `/api/wikis/WIKI/copy-access`; an older/unavailable server stops sync

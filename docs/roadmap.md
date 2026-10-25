@@ -43,7 +43,7 @@ keys are implemented. The configured owner creates wikis and registers agents.
 edits, fetch, merge and push; read-only copies fetch and fast-forward. Conflicts
 stop the operation. Batch synchronization with explicit roots, current copy
 permission checks, path exclusions and per-copy OS locks is implemented in
-0.5.0. Automatic discovery is still planned; legacy migration is
+0.5.0. Opt-in catalog discovery is also implemented; legacy migration is
 operator-owned. Human clients using the same person's OAuth login share
 that person's grants. A connection's name does not create an agent principal.
 
@@ -92,9 +92,10 @@ requires copies outside that root or relocation management.
 - Keep one executor for a physical checkout. A shared Windows/WSL copy uses the
   native Windows CLI and credential store, or WSL uses a separate signed-in
   clone. Do not run both Git implementations concurrently against one copy.
-- Integrate existing scheduler/wrapper examples with these commands. Add opt-in
-  catalog discovery next to reproduce automatic creation of eligible local
-  copies; explicit `wiki clone` is sufficient for the first pilot.
+- Integrate existing scheduler/wrapper examples with these commands. Explicit
+  `wiki sync --all --discover --root DIRECTORY` creates missing eligible copies
+  from the signed-in server. Keep discovery opt-in on each device; it never
+  grants access or replaces existing folders.
 
 Acceptance: two devices exchange edits in both directions; offline work survives;
 read-only edits remain local; revocation stops future managed fetches; overlapping

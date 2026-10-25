@@ -41,6 +41,9 @@ class State:
                     kind TEXT NOT NULL CHECK(kind IN ('user','wiki')), key TEXT NOT NULL,
                     enabled INTEGER NOT NULL, pending INTEGER NOT NULL, updated TEXT NOT NULL,
                     PRIMARY KEY(kind,key));
+                CREATE TABLE IF NOT EXISTS user_status (
+                    subject TEXT PRIMARY KEY, suspended INTEGER NOT NULL,
+                    pending INTEGER NOT NULL, updated TEXT NOT NULL);
             """)
             schema = db.execute("SELECT sql FROM sqlite_master WHERE name='grants'").fetchone()[0]
             if "'admin'" not in schema:
@@ -90,7 +93,24 @@ class State:
 
     def copies_allowed(self, subject, wiki, *, ready=True):
         flags = [self.copy_setting("user", subject), self.copy_setting("wiki", wiki)]
-        return all(flag["local_copies"] and (not ready or not flag["pending"]) for flag in flags)
+        status = self.user_status(subject)
+        return (not status["suspended"] and (not ready or not status["pending"])
+                and all(flag["local_copies"] and (not ready or not flag["pending"]) for flag in flags))
+
+    def user_status(self, subject):
+        with self.connect() as db:
+            row = db.execute("SELECT suspended,pending FROM user_status WHERE subject=?", (subject,)).fetchone()
+        return {"suspended": bool(row["suspended"]) if row else False,
+                "pending": bool(row["pending"]) if row else False}
+
+    def set_user_status(self, subject, suspended):
+        with self.connect() as db:
+            db.execute("""INSERT INTO user_status VALUES(?,?,1,?) ON CONFLICT(subject) DO UPDATE SET
+                suspended=excluded.suspended,pending=1,updated=excluded.updated""", (subject, int(suspended), now()))
+
+    def user_projected(self, subject):
+        with self.connect() as db:
+            db.execute("UPDATE user_status SET pending=0 WHERE subject=?", (subject,))
 
     def recover(self):
         with self.connect() as db:

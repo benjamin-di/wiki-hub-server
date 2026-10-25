@@ -117,7 +117,19 @@ class Service:
     def access_lock(self, slug):
         return self.access_locks.setdefault(slug, asyncio.Lock())
 
+    def require_active(self, subject):
+        if not subject:
+            raise Denied("Sign in to use this operation.")
+        status = self.state.user_status(subject)
+        if status["suspended"] or status["pending"]:
+            raise Denied("This account is suspended or its access update is pending.")
+        if subject.startswith("agent:"):
+            agent = self.state.agent(subject)
+            if agent is not None:
+                self.require_active(agent["owner"])
+
     def allowed(self, subject, slug, minimum="read"):
+        self.require_active(subject)
         validate_slug(slug)
         wiki = self.state.wiki(slug)
         role = ("admin" if wiki and wiki["owner"] == subject else self.state.role(subject, slug)) if subject else None
@@ -178,6 +190,7 @@ class Service:
             return {"wiki": slug, **self.state.copy_setting("wiki", slug)}
 
     async def user_settings(self, subject, recipient, enabled=None):
+        self.require_active(subject)
         if subject != self.settings.owner_subject:
             raise Denied("Only the configured owner manages user settings.")
         if (not isinstance(recipient, str) or not 1 <= len(recipient) <= 200
@@ -198,6 +211,31 @@ class Service:
                     await self._project_copies(wiki, recipient, role)
             self.state.copy_projected("user", recipient)
             return {"subject": recipient, **self.state.copy_setting("user", recipient)}
+
+    async def user_status(self, subject, recipient, suspended=None):
+        self.require_active(subject)
+        if subject != self.settings.owner_subject:
+            raise Denied("Only the configured owner manages account access.")
+        if (not isinstance(recipient, str) or not 1 <= len(recipient) <= 200
+                or recipient.startswith("agent:") or any(c.isspace() or ord(c) < 32 for c in recipient)):
+            raise ContentError("Use the exact human subject from wiki whoami.")
+        if suspended is None:
+            return {"subject": recipient, **self.state.user_status(recipient)}
+        if type(suspended) is not bool:
+            raise ContentError("suspended must be true or false.")
+        if suspended and recipient == self.settings.owner_subject:
+            raise ContentError("Transfer the configured owner before suspending this account.")
+        async with self.copy_lock:
+            self.require_active(subject)
+            # A pending resume also denies requests until every backend projection
+            # completes. Restarting the app or changing a share cannot clear it.
+            self.state.set_user_status(recipient, suspended)
+            for wiki in self.state.all_wikis():
+                role = "admin" if wiki["owner"] == recipient else self.state.role(recipient, wiki["slug"])
+                async with self.access_lock(wiki["slug"]):
+                    await self._project_copies(wiki, recipient, role)
+            self.state.user_projected(recipient)
+            return {"subject": recipient, **self.state.user_status(recipient)}
 
     async def share(self, subject, slug, recipient, role):
         self.allowed(subject, slug, "admin")
@@ -228,6 +266,7 @@ class Service:
             return self._access_result(wiki)
 
     async def list_wikis(self, subject):
+        self.require_active(subject)
         rows = []
         for row in self.state.list_wikis(subject):
             try:
@@ -241,6 +280,7 @@ class Service:
         ]
 
     async def add_agent(self, subject, name):
+        self.require_active(subject)
         if not self.settings.owner_subject or subject != self.settings.owner_subject:
             raise Denied("Only the configured owner can register agents in this release.")
         if not isinstance(name, str) or not 1 <= len(name) <= 120 or any(ord(c) < 32 for c in name):
@@ -250,9 +290,11 @@ class Service:
         return {**self.state.agent(identifier), "credential": token}
 
     async def agents(self, subject):
+        self.require_active(subject)
         return self.state.agents(subject)
 
     async def revoke_agent(self, subject, identifier):
+        self.require_active(subject)
         if not self.state.revoke_agent(subject, identifier):
             raise Denied("No access to this agent.")
         # Wait for any already-authorized publication before acknowledging revoke.
@@ -262,6 +304,7 @@ class Service:
         return {"id": identifier, "revoked": True}
 
     async def create(self, subject, slug, title):
+        self.require_active(subject)
         validate_slug(slug)
         if not self.settings.owner_subject or subject != self.settings.owner_subject:
             raise Denied("Only the configured owner can create wikis in this first release.")

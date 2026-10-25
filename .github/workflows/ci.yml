@@ -33,3 +33,4 @@ jobs:
       - run: >-
           uv run --locked --python 3.13 pytest tests/test_windows_credentials.py tests/test_credentials.py
           tests/test_git_auth.py tests/test_cli.py tests/test_copy_lock.py
+          tests/test_credential_lock.py

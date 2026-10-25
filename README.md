@@ -62,6 +62,9 @@ wiki unshare starter RECIPIENT_SUBJECT
 wiki share starter TRUSTED_ADMIN_SUBJECT --role admin
 wiki settings starter --local-copies deny
 wiki user set RECIPIENT_SUBJECT --local-copies deny
+wiki user status RECIPIENT_SUBJECT
+wiki user suspend RECIPIENT_SUBJECT
+wiki user resume RECIPIENT_SUBJECT
 ```
 
 For a local MCP client, configure `wiki mcp` after signing in. The remote streamable
@@ -108,6 +111,23 @@ new copy credentials; repeat it to finish after Forgejo recovers. Re-enabling
 copies permits a fresh clone; old revoked tokens do not become valid again.
 These settings control supported Git copies; readers can save content they receive
 and completed downloads or previously issued download links cannot be recalled.
+
+The configured owner can suspend a human subject with `wiki user suspend SUBJECT`.
+This blocks Wiki API/MCP operations, including existing sessions and agents owned
+by that person, and revokes their managed Git credentials across all wikis.
+Ownership, grants, sources and history are retained. A publication already accepted
+before suspension may finish; suspension waits for it before reporting success.
+An unfinished model job cannot publish after suspension succeeds.
+
+`wiki user status SUBJECT` reports `suspended` and `pending`. A failed backend
+change remains pending and blocks Wiki operations across restarts; Git may retain
+its previous access until revocation completes. Repeat the same command to finish.
+Only `wiki user resume SUBJECT` restores access under the current grants and copy
+settings. It does not revive revoked Git tokens or explicitly revoked agent keys.
+Suspend the configured owner only after changing the deployment's owner setting;
+the command refuses to suspend itself. Enrollment and provider disablement remain
+the identity provider's responsibility. Coordinate both actions when offboarding
+a person; changing the provider alone does not immediately block Wiki access.
 
 `wiki sync` on a new read-only clone fetches updates without committing or pushing
 local edits. Local edits stay on the computer. Git stops when an update would

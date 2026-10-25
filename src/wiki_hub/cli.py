@@ -13,16 +13,18 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 import webbrowser
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 
-from .copy_lock import CopyBusyError, copy_lock
+from .copy_lock import CopyBusyError, FileLockTimeoutError, copy_lock, file_lock
 
 WINDOWS = os.name == "nt"
 
@@ -42,9 +44,12 @@ def config_directory() -> Path:
 class CredentialStore:
     """Prefer the OS keyring; headless Unix falls back to an owner-only file."""
 
-    def __init__(self, directory: Path | None = None):
+    def __init__(self, directory: Path | None = None, *, lock_timeout: float = 75):
         self.directory = directory or config_directory()
         self.path = self.directory / "config.json"
+        self.lock_timeout = lock_timeout
+        self._mutex = threading.RLock()
+        self._lock_depth = 0
         self.keyring = None
         try:
             import keyring
@@ -53,6 +58,30 @@ class CredentialStore:
                 self.keyring = keyring
         except (ImportError, RuntimeError):
             pass
+
+    @contextmanager
+    def locked(self):
+        """Serialize credential reads, provider refresh and publication together."""
+        message = "Another sign-in operation is using this configuration. Retry after it finishes."
+        deadline = time.monotonic() + self.lock_timeout
+        if not self._mutex.acquire(timeout=self.lock_timeout):
+            raise CLIError(message)
+        try:
+            if self._lock_depth:
+                yield
+                return
+            self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            try:
+                with file_lock(self.directory / "credentials.lock", timeout=max(0, deadline - time.monotonic())):
+                    self._lock_depth = 1
+                    try:
+                        yield
+                    finally:
+                        self._lock_depth = 0
+            except FileLockTimeoutError as exc:
+                raise CLIError(message) from exc
+        finally:
+            self._mutex.release()
 
     def _read(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -77,20 +106,24 @@ class CredentialStore:
                 os.unlink(temporary)
 
     def server(self) -> str | None:
-        return self._read().get("server")
+        with self.locked():
+            return self._read().get("server")
 
     def set_server(self, server: str) -> None:
-        data = self._read()
-        data["server"] = server
-        self._write(data)
+        with self.locked():
+            data = self._read()
+            data["server"] = server
+            self._write(data)
 
     def agent(self) -> str | None:
-        return self._read().get("agent")
+        with self.locked():
+            return self._read().get("agent")
 
     def set_agent(self, identifier: str) -> None:
-        data = self._read()
-        data["agent"] = identifier
-        self._write(data)
+        with self.locked():
+            data = self._read()
+            data["agent"] = identifier
+            self._write(data)
 
     @staticmethod
     def _chunk_services(name: str, record: dict[str, Any]) -> list[str]:
@@ -136,6 +169,10 @@ class CredentialStore:
         self._delete_chunks(old_chunks)
 
     def get(self, name: str) -> dict[str, Any] | None:
+        with self.locked():
+            return self._get(name)
+
+    def _get(self, name: str) -> dict[str, Any] | None:
         if self.keyring:
             try:
                 value = self.keyring.get_password("wiki-hub", name)
@@ -151,6 +188,10 @@ class CredentialStore:
         return self._read().get("credentials", {}).get(name)
 
     def put(self, name: str, value: dict[str, Any]) -> None:
+        with self.locked():
+            self._put(name, value)
+
+    def _put(self, name: str, value: dict[str, Any]) -> None:
         failure = " No credential-manager backend is available."
         if self.keyring:
             try:
@@ -223,13 +264,22 @@ class APIClient:
         self.store.put(oauth_key(self.server), token)
         return token
 
+    def _token(self, key: str, failed: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self.store.locked():
+            token = self.store.get(key)
+            if not token:
+                raise CLIError("Run wiki login first.")
+            # Reload after a rejected request: another caller may have refreshed,
+            # signed in again or cleared the credential while HTTP was in flight.
+            refresh = failed is not None and token == failed
+            expired = token.get("expires_at", 0) <= time.time() + 30
+            if not self.agent_id and (expired or refresh):
+                token = self._refresh(token)
+            return token
+
     def _response(self, method: str, path: str, *, stream: bool = False, **kwargs: Any) -> httpx.Response:
         key = agent_key(self.server, self.agent_id) if self.agent_id else oauth_key(self.server)
-        token = self.store.get(key)
-        if not token:
-            raise CLIError("Run wiki login first.")
-        if not self.agent_id and token.get("expires_at", 0) <= time.time() + 30:
-            token = self._refresh(token)
+        token = self._token(key)
         def send():
             request = self.http.build_request(
                 method, self.server + path, headers={"Authorization": "Bearer " + token["access_token"]}, **kwargs
@@ -239,7 +289,7 @@ class APIClient:
         response = send()
         if response.status_code == 401 and token.get("refresh_token"):
             response.close()
-            token = self._refresh(token)
+            token = self._token(key, failed=token)
             response = send()
         try:
             self._check(response)
@@ -322,8 +372,9 @@ class APIClient:
                     resource=config["resource"],
                     expires_at=time.time() + float(payload.get("expires_in", 300)),
                 )
-                self.store.put(oauth_key(self.server), payload)
-                self.store.set_server(self.server)
+                with self.store.locked():
+                    self.store.put(oauth_key(self.server), payload)
+                    self.store.set_server(self.server)
                 print("Signed in.")
                 return
             error = payload.get("error")
@@ -560,6 +611,9 @@ def parser() -> argparse.ArgumentParser:
     user_settings = users.add_parser("set")
     user_settings.add_argument("subject")
     user_settings.add_argument("--local-copies", choices=("allow", "deny"))
+    for action in ("status", "suspend", "resume"):
+        user_action = users.add_parser(action)
+        user_action.add_argument("subject", help="Exact human subject from wiki whoami")
     agent = sub.add_parser("agent", help="Manage separately scoped agent credentials")
     agents = agent.add_subparsers(dest="agent_command", required=True)
     add_agent = agents.add_parser("add")
@@ -687,9 +741,15 @@ def main(argv: list[str] | None = None) -> int:
             value = (client.request("GET", path) if args.local_copies is None else
                      client.request("POST", path, json={"local_copies": args.local_copies == "allow"}))
         elif args.command == "user":
-            value = (client.request("GET", "/api/users/settings", params={"subject": args.subject})
-                     if args.local_copies is None else client.request("POST", "/api/users/settings", json={
-                         "subject": args.subject, "local_copies": args.local_copies == "allow"}))
+            if args.user_command == "set":
+                value = (client.request("GET", "/api/users/settings", params={"subject": args.subject})
+                         if args.local_copies is None else client.request("POST", "/api/users/settings", json={
+                             "subject": args.subject, "local_copies": args.local_copies == "allow"}))
+            elif args.user_command == "status":
+                value = client.request("GET", "/api/users/status", params={"subject": args.subject})
+            else:
+                value = client.request("POST", "/api/users/status", json={
+                    "subject": args.subject, "suspended": args.user_command == "suspend"})
         elif args.command == "access":
             value = client.request("GET", f"/api/wikis/{args.wiki}/access")
         elif args.command in ("share", "unshare"):

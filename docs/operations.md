@@ -4,12 +4,15 @@ Run one application worker. Its SQLite job journal records accepted revisions
 and marks unfinished jobs interrupted after a restart. Inspect failed jobs
 before resubmitting; the service does not silently rerun model work.
 
-Back up application state, working copies, Forgejo configuration/database,
-repositories/LFS and identity state together. In the example stack these are
-the `app`, `workspaces`, `git-data`, `git-config` and `identity` volumes. Stop
-writes briefly for a consistent snapshot, restart the services, then encrypt
-and upload that copy off-site using your normal backup tooling. Keep identity
-encryption and backup decryption keys accessible separately from the server.
+Back up application state, working copies and Forgejo configuration/database and
+repositories/LFS. In the example stack these are the `app`, `workspaces`,
+`git-data` and `git-config` volumes. Stop Wiki writes briefly for a consistent
+snapshot, restart the services, then encrypt and upload that copy off-site using
+your normal backup tooling. The example also owns its dedicated `identity` volume;
+a shared identity provider needs independent backup ownership. Wiki backup or
+restore must never stop or overwrite shared production identity. Test combined
+recovery using an isolated restored provider. Keep identity encryption and backup
+decryption keys accessible separately from the server.
 
 Before relying on real knowledge, restore a populated backup into separate
 volumes. Compare file hashes, check each SQLite database, run `git fsck`, verify

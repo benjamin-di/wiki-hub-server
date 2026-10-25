@@ -6,6 +6,9 @@ Install the CLI from the selected release checkout with `uv tool install .`.
 Run `wiki --server https://wiki.example.com login`, approve the fresh device
 code with your passkey and keep the terminal open until it reports signed in.
 Subsequent commands use that sign-in and refresh it when needed.
+Commands sharing a configuration directory coordinate credential updates and
+reuse refreshed sign-ins across processes. If another sign-in operation remains
+busy, the command reports a bounded wait failure and can be retried.
 
 A local MCP client starts the authenticated bridge:
 

@@ -34,7 +34,7 @@ with a disposable independently recovered provider.
 
 ## Current baseline
 
-Version 0.4.1 provides private repositories, Git LFS, OAuth, CLI, remote/local
+The current implementation provides private repositories, Git LFS, OAuth, CLI, remote/local
 MCP, source ingestion, lexical search, history and rollback. Explicit
 read/contribute/write/admin grants, copy settings and separately revocable agent
 keys are implemented. The configured owner creates wikis and registers agents.
@@ -42,16 +42,17 @@ keys are implemented. The configured owner creates wikis and registers agents.
 `wiki sync DIRECTORY` synchronizes one existing copy: commit writable
 edits, fetch, merge and push; read-only copies fetch and fast-forward. Conflicts
 stop the operation. Batch synchronization with explicit roots, current copy
-permission checks, path exclusions and per-copy OS locks is implemented after
-the 0.4.1 baseline. Automatic discovery is still planned; legacy migration is
+permission checks, path exclusions and per-copy OS locks is implemented in
+0.5.0. Automatic discovery is still planned; legacy migration is
 operator-owned. Human clients using the same person's OAuth login share
 that person's grants. A connection's name does not create an agent principal.
 
 Human account creation/disablement uses the identity provider. `wiki user set`
-currently controls copy settings. Disabling an identity or gateway route alone
-does not immediately revoke an already issued Wiki token, an independent agent
-key or existing Forgejo credentials. Current per-wiki grant and agent revocation
-are distinct operations. Do not claim complete account suspension yet.
+controls copy settings. Local `wiki user suspend/status/resume` operations also
+block current human sessions and owned agents and revoke managed Git credentials.
+Incomplete backend changes remain pending across restarts. Disabling an identity
+or gateway route alone does not immediately suspend Wiki access; compose the
+separate operations in the operator's offboarding procedure.
 
 ## Knowledge and application boundaries
 
@@ -122,12 +123,11 @@ key and required wikis. Remove alternate broad mounts, old MCP credentials and
 human tokens from deliberately restricted runtimes. A trusted operator shell
 with wider access is not restricted by its MCP grant alone.
 
-Before onboarding additional people, implement one Wiki suspension operation
-that denies all their API/MCP operations and agent publication, revokes their
-managed Git credentials and reports incomplete backend revocation. Compose it
-with provider/gateway offboarding in a private operator runbook; do not build an
-identity synchronization bus. Suspension must also cover wiki owners. Resume
-only through an explicit action, never a stale provisioning manifest.
+The implemented Wiki suspension operation denies their API/MCP operations and
+agent publication, revokes managed Git credentials and reports incomplete backend
+revocation. Compose it with provider/gateway offboarding in a private operator
+runbook; do not build an identity synchronization bus. Suspension covers wiki
+owners. Resume only through an explicit action, never a stale provisioning manifest.
 
 Add effective-access diagnostics showing the actual configured principal, then
 credential replacement ergonomics. Verify two disjoint agents and revocation in

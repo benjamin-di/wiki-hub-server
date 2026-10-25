@@ -90,8 +90,18 @@ def create_app(settings=None, service=None, verifier=None):
             return JSONResponse({"error": "Sign in to use wiki-hub."}, status_code=401, headers=challenge)
         path = request.path_params["path"].strip("/").split("/")
         try:
+            service.require_active(caller)
             if path == ["me"] and request.method == "GET":
                 return JSONResponse({"subject": caller, "owner": caller == settings.owner_subject})
+            if path == ["users", "status"]:
+                if request.method == "GET":
+                    return JSONResponse(await service.user_status(caller, request.query_params["subject"]),
+                                        headers={"Cache-Control": "no-store"})
+                data = await body(request)
+                if type(data.get("suspended")) is not bool:
+                    raise ContentError("suspended must be true or false.")
+                return JSONResponse(await service.user_status(caller, data["subject"], data["suspended"]),
+                                    headers={"Cache-Control": "no-store"})
             if path == ["users", "settings"]:
                 if request.method == "GET":
                     return JSONResponse(await service.user_settings(caller, request.query_params["subject"]))

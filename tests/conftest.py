@@ -30,6 +30,9 @@ class LocalForgejo:
     def revoke_copies(self, owner, slug, subject):
         pass
 
+    def set_archived(self, owner, slug, archived):
+        pass
+
     def clone_credential(self, owner, slug, write=True, subject=None):
         return {"url": self.repository_url(owner, slug), "username": owner, "token": "synthetic-repo-only"}
 

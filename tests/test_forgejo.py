@@ -106,3 +106,23 @@ def test_revoking_copies_of_a_nonexistent_backend_identity_does_not_create_an_ac
     Forgejo(settings, httpx.Client(base_url="https://git.example.test/api/v1",
                                   transport=httpx.MockTransport(handle))).revoke_copies("owner", "starter", "absent")
     assert len(calls) == 1 and calls[0].method == "GET"
+
+
+@pytest.mark.parametrize("archived", [True, False])
+def test_archive_checks_forgejo_confirmation(settings, archived):
+    def handle(request):
+        assert request.method == "PATCH" and request.url.path == "/api/v1/repos/owner/handbook"
+        assert json.loads(request.content) == {"archived": archived}
+        return httpx.Response(200, json={"archived": archived})
+
+    Forgejo(settings, httpx.Client(base_url="https://git.example.test/api/v1",
+                                  transport=httpx.MockTransport(handle))).set_archived("owner", "handbook", archived)
+
+
+@pytest.mark.parametrize("response", [None, {}, {"archived": False}, {"archived": 1}, {"archived": "true"}])
+def test_archive_never_reports_unconfirmed_backend_success(settings, response):
+    client = httpx.Client(base_url="https://git.example.test/api/v1", transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json=response) if response is not None else httpx.Response(204),
+    ))
+    with pytest.raises(ForgejoError, match="confirm repository archive"):
+        Forgejo(settings, client).set_archived("owner", "handbook", True)

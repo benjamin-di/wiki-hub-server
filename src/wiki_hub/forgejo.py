@@ -63,6 +63,11 @@ class Forgejo:
         base = self.settings.forgejo_public_url if public else self.settings.forgejo_url
         return f"{base}/{quote(owner)}/{quote(slug)}.git"
 
+    def set_archived(self, owner, slug, archived):
+        repo = self.request("PATCH", f"/repos/{owner}/{slug}", json={"archived": archived})
+        if not isinstance(repo, dict) or repo.get("archived") is not archived:
+            raise ForgejoError("Cannot confirm repository archive status; retry the operation.")
+
     def set_collaborator(self, owner, slug, subject, role):
         username = self.username(subject) if role == "none" else self.ensure_owner(subject)
         path = f"/repos/{owner}/{slug}/collaborators/{username}"

@@ -136,6 +136,23 @@ local edits. Local edits stay on the computer. Git stops when an update would
 overwrite them or when the local branch has diverged. Writable clones keep the
 normal commit/merge/push workflow and stop for unresolved conflicts.
 
+Wiki admins can run `wiki archive handbook` to keep a wiki readable while stopping
+content writes and Git pushes. Sources, history, grants and copy policies remain.
+Archived wikis disappear from the default catalog; use `wiki list --include-archived`
+or read a known wiki directly. `wiki reopen handbook` restores writing under its
+existing permissions. Agents cannot archive or reopen wikis.
+
+Archiving interrupts queued and running ingests; reopening never retries them.
+A publication already in progress finishes before archive reports success.
+Incomplete backend updates remain pending and read-only across restarts; repeat
+the operation to finish. Check `GET /api/wikis/handbook/archive` for status. Git
+may retain its previous access until the backend update completes.
+
+Both transitions revoke managed Git credentials. Sync renews a writable copy's
+credential when its effective write permission changes. For a revoked credential
+whose permission has stayed the same, run `wiki sync DIRECTORY --refresh-credential`.
+Explicit read-only copies remain read-only. Local edits are retained.
+
 Use `wiki sync --all --root ~/Wikis --json` to synchronize the managed copies
 directly inside a folder. Each copy uses its own saved server/credential, current
 copy permission and OS lock. Other repositories are skipped. A failed copy does

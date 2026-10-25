@@ -65,8 +65,13 @@ Keep the root's discovery lock file; concurrent discovery stops without cloning.
 
 The current copy permission is checked before staging edits. Run against a server
 supporting `/api/wikis/WIKI/copy-access`; an older/unavailable server stops sync
-without committing local work. A read-only credential is never upgraded by this
-check. Copies stay on `main` tracking `origin/main`; changing the remote or leaving
+without committing local work. A deliberately read-only copy is never upgraded by
+this check. A writable copy temporarily made read-only by permissions or archival
+renews its credential when writing becomes allowed again. Archive/reopen revokes
+existing Git credentials; use `wiki sync DIRECTORY --refresh-credential` if a
+credential was revoked without a change in effective write permission. This
+renews the credential without rebuilding the checkout or discarding edits.
+Copies stay on `main` tracking `origin/main`; changing the remote or leaving
 a merge, rebase or another Git operation unfinished stops synchronization.
 
 For repositories retaining application work, `.autocommit-pathspec` accepts one

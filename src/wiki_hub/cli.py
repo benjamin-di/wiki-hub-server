@@ -480,6 +480,7 @@ def clone(client: APIClient, wiki: str, directory: Path, *, read_only: bool = Fa
     target.parent.mkdir(parents=True, exist_ok=True)
     git_run(["lfs", "version"], target.parent)
     credentials = client.request("POST", f"/api/wikis/{wiki}/clone", json={"write": not read_only})
+    credentials["requested_write"] = not read_only
     parsed = urlsplit(credentials["url"])
     if parsed.scheme not in {"https", "http"} or parsed.username or parsed.password:
         raise CLIError("The server returned an invalid Git URL.")
@@ -502,7 +503,7 @@ def copy_metadata(directory: Path) -> tuple[str, str]:
     return server.rstrip("/"), wiki
 
 
-def sync(directory: Path, store: CredentialStore, *, quiet: bool = False) -> str:
+def sync(directory: Path, store: CredentialStore, *, quiet: bool = False, refresh_credential: bool = False) -> str:
     directory = directory.expanduser().resolve()
     root = Path(git_run(["rev-parse", "--show-toplevel"], directory).stdout.strip())
     lock_path = Path(git_run(["rev-parse", "--git-path", "wiki-hub-sync.lock"], root).stdout.strip())
@@ -510,12 +511,12 @@ def sync(directory: Path, store: CredentialStore, *, quiet: bool = False) -> str
         lock_path = root / lock_path
     try:
         with copy_lock(lock_path):
-            return _sync_copy(root, store, quiet=quiet)
+            return _sync_copy(root, store, quiet=quiet, refresh_credential=refresh_credential)
     except CopyBusyError as exc:
         raise CLIError(str(exc)) from exc
 
 
-def _sync_copy(root: Path, store: CredentialStore, *, quiet: bool) -> str:
+def _sync_copy(root: Path, store: CredentialStore, *, quiet: bool, refresh_credential: bool = False) -> str:
     server, wiki = copy_metadata(root)
     credentials = store.get(repo_key(root))
     if not credentials:
@@ -540,6 +541,15 @@ def _sync_copy(root: Path, store: CredentialStore, *, quiet: bool) -> str:
         raise CLIError("Local copies are disabled or awaiting a permission update. Local work was preserved.")
     if policy.get("role") not in {"read", "contribute", "write", "admin"}:
         raise CLIError("The server returned an invalid copy permission. Local work was preserved.")
+    requested_write = credentials.get("requested_write", credentials.get("write", True))
+    effective_write = requested_write and policy["role"] in {"write", "admin"}
+    if refresh_credential or credentials.get("write", True) != effective_write:
+        renewed = APIClient(server, store).request("POST", f"/api/wikis/{wiki}/clone",
+                                                 json={"write": effective_write})
+        if renewed["url"] != credentials["url"] or renewed["write"] != effective_write:
+            raise CLIError("The server returned different Git-copy details. Local work was preserved.")
+        credentials = {**renewed, "requested_write": requested_write}
+        store.put(repo_key(root), credentials)
     if (root / ".gitattributes").is_file():
         git_run(["lfs", "install", "--local", "--skip-smudge"], root)
     if credentials.get("write", True) is False or policy["role"] not in {"write", "admin"}:
@@ -651,7 +661,11 @@ def parser() -> argparse.ArgumentParser:
     create = sub.add_parser("create")
     create.add_argument("slug")
     create.add_argument("--title")
-    sub.add_parser("list")
+    listing = sub.add_parser("list")
+    listing.add_argument("--include-archived", action="store_true")
+    for action in ("archive", "reopen"):
+        command = sub.add_parser(action, help="Make a wiki read-only" if action == "archive" else "Reopen a wiki")
+        command.add_argument("wiki")
     sub.add_parser("whoami", help="Show your immutable sign-in subject for a wiki owner to share with")
     wiki_settings = sub.add_parser("settings", help="Inspect or change a wiki's Git-copy policy")
     wiki_settings.add_argument("wiki")
@@ -709,6 +723,8 @@ def parser() -> argparse.ArgumentParser:
                              help="Also create missing eligible copies from the signed-in server")
     synchronize.add_argument("--root", type=Path, help="Folder containing existing managed copies")
     synchronize.add_argument("--json", action="store_true", help="Print structured results for batch sync")
+    synchronize.add_argument("--refresh-credential", action="store_true",
+                             help="Replace a single copy's revoked Git credential without changing local files")
     history = sub.add_parser("log")
     history.add_argument("wiki")
     rollback = sub.add_parser("rollback")
@@ -726,6 +742,8 @@ def main(argv: list[str] | None = None) -> int:
             raise CLIError("Use your human sign-in configuration for login, agent management or Git copies.")
         if args.command == "sync":
             if args.all:
+                if args.refresh_credential:
+                    raise CLIError("--refresh-credential applies to a single copy; pass its directory.")
                 if args.directory is not None or args.root is None:
                     raise CLIError("Use wiki sync --all --root DIRECTORY for batch synchronization.")
                 discovered = []
@@ -754,7 +772,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 1 if failed else 0
             if args.root is not None or args.json or args.discover:
                 raise CLIError("--root, --json and --discover require wiki sync --all.")
-            sync(args.directory or Path.cwd(), store)
+            sync(args.directory or Path.cwd(), store, refresh_credential=args.refresh_credential)
             return 0
         server = args.server or os.environ.get("WIKI_SERVER_URL") or store.server()
         if not server:
@@ -799,7 +817,11 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 value = client.request("POST", f"/api/agents/{args.id}/revoke")
         elif args.command == "list":
-            value = client.request("GET", "/api/wikis")
+            value = (client.request("GET", "/api/wikis", params={"include_archived": "true"})
+                     if args.include_archived else client.request("GET", "/api/wikis"))
+        elif args.command in {"archive", "reopen"}:
+            value = client.request("POST", f"/api/wikis/{args.wiki}/archive",
+                                   json={"archived": args.command == "archive"})
         elif args.command == "whoami":
             value = client.request("GET", "/api/me")
         elif args.command == "settings":

@@ -54,6 +54,12 @@ Incomplete backend changes remain pending across restarts. Disabling an identity
 or gateway route alone does not immediately suspend Wiki access; compose the
 separate operations in the operator's offboarding procedure.
 
+Wiki admins can archive and reopen a wiki. Archival preserves reads and evidence,
+stops new content writes, interrupts unfinished ingests and revokes managed Git
+credentials. Archived wikis are omitted from the default catalog. Incomplete
+backend updates remain read-only until an explicit retry succeeds. Reopening
+preserves grants and copy settings without reviving interrupted work.
+
 ## Knowledge and application boundaries
 
 Keep explanations, decisions, curated records, original evidence and selected

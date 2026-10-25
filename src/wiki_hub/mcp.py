@@ -32,7 +32,7 @@ def create_mcp(service, auth=None, subject_provider=None):
 
     @mcp.tool(annotations=READ)
     async def wiki_list() -> list[dict]:
-        """List only the wikis currently accessible to this caller."""
+        """List accessible active wikis. Archived wikis remain readable by their known name."""
         return await call("list_wikis")
 
     @mcp.tool(annotations=READ)

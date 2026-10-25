@@ -19,6 +19,7 @@ from .state import State
 
 log = logging.getLogger(__name__)
 ROLES = {"read": 0, "contribute": 1, "write": 2, "admin": 3}
+ARCHIVE_STATES = {"archiving", "archived", "reopening"}
 
 
 class Denied(Exception):
@@ -141,6 +142,8 @@ class Service:
             self.allowed(agent["owner"], slug, minimum)
         if wiki is None or role is None or ROLES[role] < ROLES[minimum]:
             raise Denied("No access to this wiki.")
+        if wiki["status"] in ARCHIVE_STATES and minimum in ("contribute", "write"):
+            raise Denied("This wiki is archived or its archive update is pending; content is read-only.")
         return wiki
 
     async def access(self, subject, slug):
@@ -150,8 +153,53 @@ class Service:
     async def copy_access(self, subject, slug):
         wiki = self.allowed(subject, slug)
         role = "admin" if wiki["owner"] == subject else self.state.role(subject, slug)
+        if wiki["status"] in ARCHIVE_STATES:
+            role = "read"
         return {"wiki": slug, "role": role,
                 "local_copies": not subject.startswith("agent:") and self.state.copies_allowed(subject, slug)}
+
+    @staticmethod
+    def _archive_result(wiki):
+        status = wiki["status"]
+        return {"wiki": wiki["slug"], "status": status, "archived": status == "archived",
+                "read_only": status in ARCHIVE_STATES, "pending": status in {"archiving", "reopening"}}
+
+    async def archive(self, subject, slug, archived=None):
+        wiki = self.allowed(subject, slug, "admin")
+        if archived is None:
+            return self._archive_result(wiki)
+        if type(archived) is not bool:
+            raise ContentError("archived must be true or false.")
+        # Publication takes access_lock after write_lock. Never wait for the
+        # long-running model's write_lock while holding access_lock here.
+        async with self.copy_lock, self.access_lock(slug):
+            wiki = self.allowed(subject, slug, "admin")
+            if wiki["status"] == "initializing":
+                raise ContentError("Finish creating this wiki before archiving it.")
+            if wiki["status"] == ("archived" if archived else "ready"):
+                return self._archive_result(wiki)
+            self.state.archive_transition(slug, "archiving" if archived else "reopening")
+            members = {wiki["owner"], *(row["subject"] for row in self.state.grants(slug)
+                                        if not row["subject"].startswith("agent:"))}
+
+            def project():
+                if archived:
+                    self.forgejo.set_archived(wiki["repo_owner"], slug, True)
+                # Reopening must revoke before unarchiving, including after an
+                # uncertain archive, so old writable credentials cannot revive.
+                for recipient in sorted(members):
+                    self.forgejo.revoke_copies(wiki["repo_owner"], slug, recipient)
+                if not archived:
+                    self.forgejo.set_archived(wiki["repo_owner"], slug, False)
+
+            projection = asyncio.create_task(asyncio.to_thread(project))
+            try:
+                await asyncio.shield(projection)
+            except asyncio.CancelledError:
+                await projection
+                raise
+            self.state.archive_projected(slug, archived)
+            return self._archive_result(self.state.wiki(slug))
 
     def _access_result(self, wiki):
         return {"wiki": wiki["slug"], "owner": wiki["owner"], "grants": self.state.grants(wiki["slug"]),
@@ -265,10 +313,12 @@ class Service:
             self.state.projected(slug, recipient)
             return self._access_result(wiki)
 
-    async def list_wikis(self, subject):
+    async def list_wikis(self, subject, include_archived=False):
         self.require_active(subject)
         rows = []
         for row in self.state.list_wikis(subject):
+            if row["status"] in ARCHIVE_STATES and not include_archived:
+                continue
             try:
                 self.allowed(subject, row["slug"])
                 rows.append(row)
@@ -314,6 +364,10 @@ class Service:
             existing = self.state.wiki(slug)
             if existing:
                 wiki = self.allowed(subject, slug)
+                if wiki["status"] in ARCHIVE_STATES:
+                    raise ContentError("This wiki is archived or pending. Use wiki reopen to make it writable.")
+                if wiki["status"] == "ready":
+                    return {"slug": slug, "title": wiki["title"], "status": "ready"}
             else:
                 owner = await asyncio.to_thread(self.forgejo.ensure_owner, subject)
                 repo = await asyncio.to_thread(self.forgejo.create_repository, owner, slug)
@@ -456,6 +510,8 @@ class Service:
         revision = None
         try:
             async with self.write_lock(job["wiki"]):
+                if self.state.job(job_id)["status"] != "queued":
+                    return
                 wiki = self.allowed(job["subject"], job["wiki"], "contribute")
                 self.state.update_job(job_id, "running")
                 async with self.lock(job["wiki"]):
@@ -470,6 +526,8 @@ class Service:
                 preserved = preserved_sources(work)
                 # Match the first deployment's one worker slot; queue before starting its HTTP timeout.
                 async with self.model_slot:
+                    if self.state.job(job_id)["status"] != "running":
+                        return
                     self.allowed(job["subject"], job["wiki"], "contribute")
                     await self.runner(work, job, raw_path, reference_path)
                 for path, digest in preserved.items():
@@ -483,6 +541,8 @@ class Service:
                         )
                     raise ContentError("A preserved source or reference changed; the job was not published.")
                 async with self.access_lock(job["wiki"]), self.lock(job["wiki"]):
+                    if self.state.job(job_id)["status"] != "running":
+                        return
                     self.allowed(job["subject"], job["wiki"], "contribute")
                     publication = asyncio.create_task(
                         asyncio.to_thread(
@@ -507,7 +567,7 @@ class Service:
                 except Exception:
                     log.warning("Accepted job %s retained its working copy for cleanup", job_id)
         except asyncio.CancelledError:
-            if revision is None:
+            if revision is None and self.state.job(job_id)["status"] != "interrupted":
                 self.state.update_job(
                     job_id,
                     "interrupted",
@@ -521,7 +581,8 @@ class Service:
             safe_error = (
                 str(exc) if isinstance(exc, (ContentError, Denied)) else "Job failed; inspect its working copy."
             )
-            self.state.update_job(job_id, "failed", revision=revision, error=safe_error)
+            if self.state.job(job_id)["status"] != "interrupted":
+                self.state.update_job(job_id, "failed", revision=revision, error=safe_error)
 
     async def job(self, subject, jobid):
         job = self.state.job(jobid)
@@ -541,19 +602,32 @@ class Service:
     async def rollback(self, subject, wiki, revision):
         async with self.write_lock(wiki), self.access_lock(wiki), self.lock(wiki):
             row = self.allowed(subject, wiki, "write")
-            return await asyncio.to_thread(self.git.rollback, row, revision, subject)
+            publication = asyncio.create_task(asyncio.to_thread(self.git.rollback, row, revision, subject))
+            try:
+                return await asyncio.shield(publication)
+            except asyncio.CancelledError:
+                await publication
+                raise
 
     async def clone(self, subject, wiki, write=True):
         if subject.startswith("agent:"):
             raise Denied("Agents use API/MCP access; Git credentials are for people.")
         async with self.copy_lock, self.access_lock(wiki):
-            row = self.allowed(subject, wiki, "write" if write else "read")
+            row = self.allowed(subject, wiki)
+            write = write and row["status"] not in ARCHIVE_STATES
+            if write:
+                self.allowed(subject, wiki, "write")
             if not self.state.copies_allowed(subject, wiki):
                 raise Denied("Local Git copies are disabled or their permission update is pending.")
-            credential = await asyncio.to_thread(
+            issuance = asyncio.create_task(asyncio.to_thread(
                 self.forgejo.clone_credential, row["repo_owner"], wiki, write,
                 subject=subject if subject != row["owner"] else None,
-            )
+            ))
+            try:
+                credential = await asyncio.shield(issuance)
+            except asyncio.CancelledError:
+                await issuance
+                raise
             return {**credential, "write": write}
 
     async def shutdown(self):

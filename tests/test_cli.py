@@ -319,13 +319,66 @@ def test_sync_installs_local_lfs_filters_and_transfers_original_bytes(copies, st
 
 def test_sync_uses_current_role_without_upgrading_a_read_only_copy(copies, store, monkeypatch):
     remote, _, local = copies
-    monkeypatch.setattr(cli.APIClient, "request", lambda *a: {"role": "read", "local_copies": True})
+    def request(self, method, path, **kwargs):
+        if method == "GET":
+            return {"role": "read", "local_copies": True}
+        assert path.endswith("/clone") and kwargs["json"] == {"write": False}
+        return {"url": str(remote), "username": "test-user", "token": "fresh-read-token", "write": False}
+
+    monkeypatch.setattr(cli.APIClient, "request", request)
     before = git(remote, "rev-parse", "main")
     (local / "local.md").write_text("Local edits remain local after a downgrade\n")
     assert cli.sync(local, store) == "read-only"
     assert git(local, "rev-parse", "HEAD") == before
     assert "local.md" in git(local, "status", "--porcelain")
     assert git(remote, "rev-parse", "main") == before
+
+
+def test_sync_archive_and_reopen_refresh_credentials_without_losing_local_edits(copies, store, monkeypatch):
+    remote, _, local = copies
+    role, renewed = "read", []
+
+    def request(self, method, path, **kwargs):
+        if method == "GET":
+            return {"role": role, "local_copies": True}
+        write = kwargs["json"]["write"]
+        renewed.append(write)
+        return {"url": str(remote), "username": "test-user", "token": "fresh-token", "write": write}
+
+    monkeypatch.setattr(cli.APIClient, "request", request)
+    before = git(remote, "rev-parse", "main")
+    (local / "local.md").write_text("Offline work must survive archival\n")
+    assert cli.sync(local, store) == "read-only"
+    assert git(remote, "rev-parse", "main") == before
+    assert store.get(cli.repo_key(local))["requested_write"] is True
+    role = "admin"
+    assert cli.sync(local, store) == "synced"
+    assert git(remote, "show", "main:local.md") == "Offline work must survive archival"
+    assert renewed == [False, True]
+    # An explicit read-only clone stays read-only, including after renewal.
+    credential = store.get(cli.repo_key(local))
+    credential.update(write=False, requested_write=False)
+    store.put(cli.repo_key(local), credential)
+    (local / "other.md").write_text("Keep this local\n")
+    assert cli.sync(local, store, refresh_credential=True) == "read-only"
+    assert renewed == [False, True, False]
+    assert "other.md" in git(local, "status", "--porcelain")
+
+
+def test_sync_refuses_changed_credential_remote_before_committing(copies, store, monkeypatch):
+    remote, _, local = copies
+    def request(self, method, path, **kwargs):
+        if method == "GET":
+            return {"role": "write", "local_copies": True}
+        return {"url": "https://other.example.test/other.git", "write": True}
+
+    monkeypatch.setattr(cli.APIClient, "request", request)
+    (local / "local.md").write_text("Preserve without committing\n")
+    before = git(remote, "rev-parse", "main")
+    with pytest.raises(cli.CLIError, match="different Git-copy details"):
+        cli.sync(local, store, refresh_credential=True)
+    assert git(local, "rev-parse", "HEAD") == before
+    assert "local.md" in git(local, "status", "--porcelain")
 
 
 @pytest.mark.parametrize("response", [{"role": "write", "local_copies": False}, {"local_copies": True}])

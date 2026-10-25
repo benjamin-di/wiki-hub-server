@@ -120,7 +120,10 @@ def create_app(settings=None, service=None, verifier=None):
                 return JSONResponse(await service.revoke_agent(caller, path[1]))
             if path == ["wikis"]:
                 if request.method == "GET":
-                    return JSONResponse(await service.list_wikis(caller))
+                    include = request.query_params.get("include_archived", "false")
+                    if include not in {"true", "false"}:
+                        raise ContentError("include_archived must be true or false.")
+                    return JSONResponse(await service.list_wikis(caller, include_archived=include == "true"))
                 if request.method == "POST":
                     data = await body(request)
                     return JSONResponse(await service.create(caller, data["slug"], data["title"]), status_code=201)
@@ -141,6 +144,8 @@ def create_app(settings=None, service=None, verifier=None):
                         return JSONResponse(await service.history(caller, wiki))
                     if operation == "access":
                         return JSONResponse(await service.access(caller, wiki))
+                    if operation == "archive":
+                        return JSONResponse(await service.archive(caller, wiki), headers={"Cache-Control": "no-store"})
                     if operation == "copy-access":
                         return JSONResponse(await service.copy_access(caller, wiki),
                                             headers={"Cache-Control": "no-store"})
@@ -160,6 +165,11 @@ def create_app(settings=None, service=None, verifier=None):
                         return JSONResponse(await service.ingest(
                             caller, wiki, data["filename"], data["content_base64"], data.get("instructions", ""),
                         ), status_code=202)
+                    if operation == "archive":
+                        if type(data.get("archived")) is not bool:
+                            raise ContentError("archived must be true or false.")
+                        return JSONResponse(await service.archive(caller, wiki, data["archived"]),
+                                            headers={"Cache-Control": "no-store"})
                     if operation == "settings":
                         if type(data.get("local_copies")) is not bool:
                             raise ContentError("local_copies must be true or false.")

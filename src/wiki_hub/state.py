@@ -196,6 +196,20 @@ class State:
         with self.connect() as db:
             db.execute("UPDATE wikis SET status='ready' WHERE slug=?", (slug,))
 
+    def archive_transition(self, slug, status):
+        """Close publication and interrupt outstanding jobs in the same transaction."""
+        with self.connect() as db:
+            db.execute("UPDATE wikis SET status=? WHERE slug=?", (status, slug))
+            db.execute(
+                "UPDATE jobs SET status='interrupted',error=?,updated=? "
+                "WHERE wiki=? AND status IN ('queued','running')",
+                ("Wiki archived. Inspect this job before resubmitting after reopening.", now(), slug),
+            )
+
+    def archive_projected(self, slug, archived):
+        with self.connect() as db:
+            db.execute("UPDATE wikis SET status=? WHERE slug=?", ("archived" if archived else "ready", slug))
+
     def add_job(self, job_id, wiki, subject, filename, source_path, instructions):
         stamp = now()
         with self.connect() as db:

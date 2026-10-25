@@ -141,6 +141,8 @@ content writes and Git pushes. Sources, history, grants and copy policies remain
 Archived wikis disappear from the default catalog; use `wiki list --include-archived`
 or read a known wiki directly. `wiki reopen handbook` restores writing under its
 existing permissions. Agents cannot archive or reopen wikis.
+Admins can prepare read/contribute agent grants while archived, capped by the
+active owner's role. Archival continues to block ingestion until reopening.
 
 Archiving interrupts queued and running ingests; reopening never retries them.
 A publication already in progress finishes before archive reports success.

@@ -303,7 +303,13 @@ class Service:
                 if role not in ("read", "contribute", "none"):
                     raise ContentError("Agents are limited to read or contribute.")
                 if role != "none":
-                    self.allowed(agent["owner"], slug, role)
+                    # Archival blocks content writes, not preparation of grants.
+                    # Check the active owner's actual role ceiling independently.
+                    owner_wiki = self.allowed(agent["owner"], slug)
+                    owner_role = ("admin" if owner_wiki["owner"] == agent["owner"]
+                                  else self.state.role(agent["owner"], slug))
+                    if ROLES[owner_role] < ROLES[role]:
+                        raise Denied("The agent's owner does not have this role on the wiki.")
                 self.state.set_grant(slug, recipient, role)
                 self.state.projected(slug, recipient)
                 return self._access_result(wiki)

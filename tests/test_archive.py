@@ -81,6 +81,34 @@ async def test_only_human_wiki_admins_archive(service):
     await service.archive("delegate", "handbook", False)
 
 
+async def test_agent_grants_can_be_prepared_while_archived_without_enabling_ingest(service):
+    await service.create("owner", "handbook", "Handbook")
+    agent = await service.add_agent("owner", "Source filing")
+    await service.archive("owner", "handbook", True)
+    await service.share("owner", "handbook", agent["id"], "contribute")
+    assert service.state.role(agent["id"], "handbook") == "contribute"
+    with pytest.raises(Denied, match="read-only"):
+        await service.ingest(agent["id"], "handbook", "note.txt", "bmV3")
+    await service.archive("owner", "handbook", False)
+    assert service.allowed(agent["id"], "handbook", "contribute")
+
+
+async def test_archived_agent_grant_still_obeys_its_owners_role_and_suspension(service):
+    await service.create("owner", "handbook", "Handbook")
+    await service.share("owner", "handbook", "reader", "read")
+    service.state.add_agent("agent:reader", "reader", "Reader workflow", "synthetic-reader-token")
+    await service.archive("owner", "handbook", True)
+    await service.share("owner", "handbook", "agent:reader", "read")
+    with pytest.raises(Denied):
+        await service.share("owner", "handbook", "agent:reader", "contribute")
+    assert service.state.role("agent:reader", "handbook") == "read"
+    await service.share("owner", "handbook", "reader", "contribute")
+    await service.share("owner", "handbook", "agent:reader", "contribute")
+    await service.user_status("owner", "reader", True)
+    with pytest.raises(Denied):
+        await service.share("owner", "handbook", "agent:reader", "read")
+
+
 @pytest.mark.parametrize("failure", ["set_archived", "revoke_copies"])
 async def test_backend_failure_stays_read_only_across_restart_and_explicit_retry(service, monkeypatch, failure):
     await service.create("owner", "handbook", "Handbook")

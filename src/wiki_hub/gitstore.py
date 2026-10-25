@@ -57,7 +57,7 @@ class GitStore:
         )
         self.askpass.chmod(0o700)
 
-    def run(self, path, *args, check=True, timeout=120, input_data=None, smudge=False, config=None):
+    def run(self, path, *args, check=True, timeout=120, input_data=None, smudge=False, config=None, output_file=None):
         env = os.environ.copy()
         env.update(
             GIT_ASKPASS=str(self.askpass.resolve()),
@@ -86,7 +86,8 @@ class GitStore:
                 ],
                 cwd=path,
                 env=env,
-                capture_output=True,
+                stdout=output_file if output_file is not None else subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 timeout=timeout,
                 input=input_data,
             )
@@ -97,7 +98,7 @@ class GitStore:
             raise GitError(
                 f"Git {args[0]} failed (exit {result.returncode}). Inspect the repository/job before retrying."
             )
-        return result.stdout
+        return result.stdout or b""
 
     def lfs(self, path, wiki, *args, **kwargs):
         # A writer's .lfsconfig must not redirect privileged server requests to
@@ -274,17 +275,22 @@ class GitStore:
         if not match:
             raise ContentError("The source is not a valid Git LFS document.")
         digest, size = match[1].decode(), int(match[2])
-        # Explicit smudging bypasses skip-smudge and leaves the canonical working tree untouched.
-        data = self.lfs(repo, wiki, "smudge", "--", path, input_data=pointer, smudge=True, timeout=600)
-        if len(data) != size or hashlib.sha256(data).hexdigest() != digest:
-            raise ContentError("The source download did not match its stored hash and size.")
         directory = self.settings.state_dir / "originals" / wiki["slug"]
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         target = directory / digest
         fd, temporary = tempfile.mkstemp(dir=directory)
         try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(data)
+            # Spool directly to a private file: legacy/bulk originals can exceed
+            # the submission limit and must not be buffered in application RAM.
+            # Explicit smudging leaves the canonical checkout untouched.
+            with os.fdopen(fd, "w+b") as stream:
+                self.lfs(repo, wiki, "smudge", "--", path, input_data=pointer, smudge=True,
+                         timeout=600, output_file=stream)
+                stream.flush()
+                stream.seek(0)
+                actual = hashlib.file_digest(stream, "sha256").hexdigest()
+                if os.fstat(stream.fileno()).st_size != size or actual != digest:
+                    raise ContentError("The source download did not match its stored hash and size.")
             os.replace(temporary, target)
         finally:
             if os.path.exists(temporary):

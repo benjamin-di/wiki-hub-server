@@ -294,3 +294,62 @@ def test_repository_lfs_override_cannot_redirect_privileged_downloads_or_uploads
     output = store.lfs(repo, wiki, "env").decode()
     assert "Endpoint=https://git.example.test/owner/pilot.git/info/lfs" in output
     assert "untrusted.example.test" not in output
+
+
+def test_large_existing_original_download_uses_bounded_application_memory(setup_store):
+    import tracemalloc
+
+    store, wiki, remote = setup_store
+    writer = remote.parent / "bulk-writer"
+    store.run(remote.parent, "clone", remote.as_uri(), str(writer))
+    store.run(writer, "config", "user.name", "Bulk source fixture")
+    store.run(writer, "config", "user.email", "fixture@example.invalid")
+    store.run(writer, "lfs", "install", "--local", "--skip-smudge", "--skip-repo")
+    (writer / "raw").mkdir(exist_ok=True)
+    block = bytes(range(256)) * 4096
+    original = writer / "raw/large.bin"
+    expected = hashlib.sha256()
+    with original.open("wb") as stream:
+        for _ in range(33):
+            stream.write(block)
+            expected.update(block)
+    store.run(writer, "add", "raw/large.bin")
+    store.run(writer, "commit", "-m", "Bulk original exceeding source submission limit")
+    store.lfs(writer, wiki, "push", "origin", "HEAD")
+    store.run(writer, "push", "origin", "HEAD:main")
+    repo = store.repo(wiki["slug"])
+    tracemalloc.start()
+    try:
+        downloaded = store.original(wiki, "raw/large.bin")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 8 * 1024 * 1024
+    assert downloaded.stat().st_size == 33 * len(block)
+    with downloaded.open("rb") as stream:
+        assert hashlib.file_digest(stream, "sha256").hexdigest() == expected.hexdigest()
+    assert store.run(repo, "status", "--porcelain") == b""
+
+
+@pytest.mark.parametrize("failure", ["mismatch", "backend"])
+def test_failed_original_transfer_keeps_verified_file_and_removes_temporary_bytes(setup_store, monkeypatch, failure):
+    store, wiki, _remote = setup_store
+    repo, work, base = store.worktree(wiki, "verified-original")
+    original = b"Exact original evidence\x00\xff\n"
+    (work / "raw/source.bin").write_bytes(original)
+    (work / "wiki/source.md").write_text("[Original](../raw/source.bin)\n")
+    store.publish(wiki, repo, work, base, "test-owner", "verified-original")
+    store.cleanup(repo, work)
+    verified = store.original(wiki, "raw/source.bin")
+
+    def failed(*_args, output_file, **_kwargs):
+        output_file.write(b"partial or corrupt source")
+        if failure == "backend":
+            raise GitError("Synthetic failed source transfer")
+        return b""
+
+    monkeypatch.setattr(store, "lfs", failed)
+    with pytest.raises((GitError, ContentError)):
+        store.original(wiki, "raw/source.bin")
+    assert verified.read_bytes() == original
+    assert list(verified.parent.iterdir()) == [verified]

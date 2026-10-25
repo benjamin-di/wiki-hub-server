@@ -83,6 +83,8 @@ Local copies start with Markdown and Git LFS pointers. To retrieve an original P
 or other source, use its cited `raw/` path with `wiki docs get` and choose a new
 output file. Downloads use the current sign-in, refresh it when needed, and remove
 incomplete files after a failed transfer. Existing output files are never replaced.
+The server verifies original hashes in a private temporary file before serving
+them, keeping application memory bounded for existing large LFS documents.
 
 Recipients obtain their exact sign-in subject with `wiki whoami`. A `read` grant
 allows retrieval and `wiki clone --read-only`. `contribute` also allows sources to

@@ -125,6 +125,32 @@ def test_cli_search_uses_authenticated_api(store, monkeypatch, capsys):
     assert "secret-token" not in output.out + output.err
 
 
+@pytest.mark.parametrize("agent", [False, True])
+@pytest.mark.parametrize("access", [False, True])
+def test_cli_identity_uses_the_configured_principal_and_optional_access_report(
+    store, monkeypatch, capsys, agent, access
+):
+    server = "https://wiki.example"
+    store.set_server(server)
+    store.put(cli.oauth_key(server), {"access_token": "secret-human", "expires_at": time.time() + 1000})
+    if agent:
+        store.set_agent("agent:fixture")
+        store.put(cli.agent_key(server, "agent:fixture"), {"access_token": "secret-agent"})
+
+    def handle(request):
+        assert request.url.path == ("/api/me/access" if access else "/api/me")
+        assert request.headers["Authorization"] == ("Bearer secret-agent" if agent else "Bearer secret-human")
+        return httpx.Response(200, json={"subject": "agent:fixture" if agent else "human"})
+
+    client = cli.APIClient(server, store, httpx.Client(transport=httpx.MockTransport(handle)))
+    monkeypatch.setattr(cli, "CredentialStore", lambda: store)
+    monkeypatch.setattr(cli, "APIClient", lambda *args: client)
+    assert cli.main(["whoami", *(["--access"] if access else [])]) == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out)["subject"] == ("agent:fixture" if agent else "human")
+    assert "secret-human" not in output.out + output.err and "secret-agent" not in output.out + output.err
+
+
 def test_failed_api_response_does_not_print_body_with_secrets(store):
     store.put(cli.oauth_key("https://wiki.example"), {"access_token": "private", "expires_at": time.time() + 1000})
     client = cli.APIClient(

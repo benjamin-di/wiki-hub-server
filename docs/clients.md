@@ -131,3 +131,22 @@ wiki share starter agent:RETURNED_ID --role contribute
 Set `WIKI_CONFIG_DIR` to that private directory for the agent's `wiki mcp` process.
 Do not give it the human sign-in directory. Agent grants are capped by the
 owner's current access and can be revoked with `wiki agent revoke ID`.
+
+Run `wiki whoami --access` with the same `WIKI_CONFIG_DIR` as a workflow to see
+the identity it actually uses and its current per-wiki permissions. The report
+includes archived wikis the caller may read, copy eligibility and the permitted
+roles. An archived wiki can retain `admin` while content writes and ingestion
+are denied. An agent's permissions intersect its own grants with its owner's
+current access; agents never receive `write`, `admin` or local-copy access.
+Wikis the caller cannot read and other people's grant records are omitted.
+The report describes Wiki Hub access; host files and other services have their
+own permissions. It does not change grants or request Git credentials.
+
+To replace an agent credential, create a replacement with `wiki agent add`
+using a new private configuration directory. Grant only the reviewed wikis and
+roles with `wiki share`, then inspect `wiki whoami --access` using that new
+directory. Switch the workflow to the new configuration and check it works
+before revoking the old agent with `wiki agent revoke OLD_ID`. The replacement
+starts without grants and keeps its own identity; no saved manifest restores
+the old agent's access. If the old credential must stop immediately, revoke it
+first and accept the interruption while replacing it.

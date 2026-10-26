@@ -110,6 +110,17 @@ class GitStore:
             config = dict.fromkeys(("lfs.url", "lfs.pushurl", "remote.origin.lfsurl", "remote.origin.lfspushurl"),
                                    endpoint)
             config.update({"lfs.remote.autodetect": "false", "lfs.remote.searchall": "false"})
+            if getattr(self.settings, "forgejo_public_url", ""):
+                public = self.forgejo.repository_url(wiki["repo_owner"], wiki["slug"], public=True)
+                if public != url and urlsplit(public).scheme in ("http", "https"):
+                    # Forgejo may advertise its public origin in object actions.
+                    # Keep both LFS path forms on this repository's backend URL.
+                    config["lfs.transfer.enablehrefrewrite"] = "true"
+                    for suffix in (".git/info/lfs/", "/info/lfs/"):
+                        internal = url.removesuffix(".git") + suffix
+                        external = public.removesuffix(".git") + suffix
+                        config[f"url.{internal}.insteadOf"] = external
+                        config[f"url.{internal}.pushInsteadOf"] = external
         return self.run(path, "lfs", *args, config=config, **kwargs)
 
     def repo(self, slug):

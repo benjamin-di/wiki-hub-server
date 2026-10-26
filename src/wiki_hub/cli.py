@@ -666,7 +666,8 @@ def parser() -> argparse.ArgumentParser:
     for action in ("archive", "reopen"):
         command = sub.add_parser(action, help="Make a wiki read-only" if action == "archive" else "Reopen a wiki")
         command.add_argument("wiki")
-    sub.add_parser("whoami", help="Show your immutable sign-in subject for a wiki owner to share with")
+    identity = sub.add_parser("whoami", help="Show your immutable sign-in subject for a wiki owner to share with")
+    identity.add_argument("--access", action="store_true", help="Include your current effective wiki permissions")
     wiki_settings = sub.add_parser("settings", help="Inspect or change a wiki's Git-copy policy")
     wiki_settings.add_argument("wiki")
     wiki_settings.add_argument("--local-copies", choices=("allow", "deny"))
@@ -823,7 +824,7 @@ def main(argv: list[str] | None = None) -> int:
             value = client.request("POST", f"/api/wikis/{args.wiki}/archive",
                                    json={"archived": args.command == "archive"})
         elif args.command == "whoami":
-            value = client.request("GET", "/api/me")
+            value = client.request("GET", "/api/me/access" if args.access else "/api/me")
         elif args.command == "settings":
             path = f"/api/wikis/{args.wiki}/settings"
             value = (client.request("GET", path) if args.local_copies is None else

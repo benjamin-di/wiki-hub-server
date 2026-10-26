@@ -335,6 +335,25 @@ class Service:
             for row in rows
         ]
 
+    async def effective_access(self, subject):
+        self.require_active(subject)
+        wikis = []
+        for row in await self.list_wikis(subject, include_archived=True):
+            permissions = []
+            for role in ROLES:
+                try:
+                    self.allowed(subject, row["slug"], role)
+                    permissions.append(role)
+                except Denied:
+                    continue
+            if "read" in permissions:
+                wikis.append({"slug": row["slug"], "title": row["title"], "status": row["status"],
+                              "permissions": permissions,
+                              "local_copies": not subject.startswith("agent:")
+                              and self.state.copies_allowed(subject, row["slug"])})
+        return {"subject": subject, "owner": subject == self.settings.owner_subject,
+                "credential_type": "agent_key" if subject.startswith("agent:") else "oauth", "wikis": wikis}
+
     async def add_agent(self, subject, name):
         self.require_active(subject)
         if not self.settings.owner_subject or subject != self.settings.owner_subject:

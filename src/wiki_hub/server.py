@@ -93,6 +93,8 @@ def create_app(settings=None, service=None, verifier=None):
             service.require_active(caller)
             if path == ["me"] and request.method == "GET":
                 return JSONResponse({"subject": caller, "owner": caller == settings.owner_subject})
+            if path == ["me", "access"] and request.method == "GET":
+                return JSONResponse(await service.effective_access(caller), headers={"Cache-Control": "no-store"})
             if path == ["users", "status"]:
                 if request.method == "GET":
                     return JSONResponse(await service.user_status(caller, request.query_params["subject"]),

@@ -136,9 +136,13 @@ revocation. Compose it with provider/gateway offboarding in a private operator
 runbook; do not build an identity synchronization bus. Suspension covers wiki
 owners. Resume only through an explicit action, never a stale provisioning manifest.
 
-Add effective-access diagnostics showing the actual configured principal, then
-credential replacement ergonomics. Verify two disjoint agents and revocation in
-already connected sessions. Gateway workload keys and Wiki agent keys remain
+Use `wiki whoami --access` to inspect the actual configured principal, current
+per-wiki permissions and copy eligibility. It uses the same permission checks
+as content operations, includes readable archived wikis and never lists another
+person's grants. Replace credentials through the documented new-agent,
+reviewed-grant and old-agent revocation procedure in [Clients](clients.md).
+Verify two disjoint agents and revocation in already connected sessions.
+Gateway workload keys and Wiki agent keys remain
 separate credentials with separate audiences and permissions unless an explicit
 delegation contract is implemented and tested.
 

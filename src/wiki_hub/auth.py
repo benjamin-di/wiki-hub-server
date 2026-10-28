@@ -12,24 +12,32 @@ from fastmcp.utilities.auth import decode_jwt_header
 WIKI_SCOPE = "wiki:access"
 
 
+class WorkloadAccessToken(AccessToken):
+    """Keep the signed identity intact and carry its separately resolved Wiki actor."""
+
+    wiki_subject: str
+
+
 class OIDCSettings(Protocol):
     oidc_issuer: str
     oidc_jwks_url: str | None
     oidc_audience: str
 
 
-def principal_subject(access_token: AccessToken) -> str:
-    """Return the signed subject, never an OAuth application's client ID.
-
-    This authenticates an identity only. The caller must still look up that
-    identity's current grants, including whether the account is disabled.
-    """
+def identity_subject(access_token: AccessToken) -> str:
+    """Read the signed subject without substituting a client ID or local agent."""
     subject = access_token.claims.get("sub")
     if not isinstance(subject, str) or not subject or subject != subject.strip():
         raise ValueError("The access token has no valid subject")
     if access_token.subject is not None and access_token.subject != subject:
         raise ValueError("The access token subject is inconsistent")
     return subject
+
+
+def principal_subject(access_token: AccessToken) -> str:
+    """Resolve an authenticated actor; current local permissions still apply."""
+    subject = identity_subject(access_token)
+    return access_token.wiki_subject if isinstance(access_token, WorkloadAccessToken) else subject
 
 
 def _numeric_date(value: object) -> bool:
@@ -69,7 +77,7 @@ class PocketIDVerifier(JWTVerifier):
         ):
             return None
         try:
-            principal_subject(access_token)
+            identity_subject(access_token)
         except ValueError:
             return None
         return access_token
@@ -92,7 +100,7 @@ def create_verifier(settings: OIDCSettings) -> PocketIDVerifier:
 
 
 class PrincipalVerifier(TokenVerifier):
-    """Human OAuth and server-issued, independently revocable agent credentials."""
+    """Human OAuth, bound Pocket workloads and independently revocable local keys."""
 
     def __init__(self, oidc, state):
         super().__init__(required_scopes=[WIKI_SCOPE])
@@ -107,7 +115,27 @@ class PrincipalVerifier(TokenVerifier):
             return AccessToken(token=token, client_id="wiki-agent", subject=identifier,
                                scopes=[WIKI_SCOPE], claims={"sub": identifier})
         access = await self.oidc.verify_token(token)
-        # Reserve this namespace for credentials issued by this server.
-        if access is not None and principal_subject(access).startswith("agent:"):
+        if access is None:
+            return None
+        subject = identity_subject(access)
+        claims = access.claims
+        # Pocket ID uses client-CLIENT_ID only for the client-credentials grant.
+        # An unregistered workload must never become a human with direct grants.
+        if (subject.startswith("client-")
+                or self.state.is_workload_client(claims.get("iss"), access.client_id)):
+            client = claims.get("client_id")
+            issued, expires = claims.get("iat"), claims.get("exp")
+            if (not isinstance(client, str) or not client or access.client_id != client
+                    or subject != "client-" + client or set(access.scopes) != {WIKI_SCOPE}
+                    or not _numeric_date(issued) or not _numeric_date(expires)
+                    or expires - issued > 900
+                    or any(name in claims for name in ("groups", "person_id", "email", "email_verified"))):
+                return None
+            agent = self.state.workload_agent(claims.get("iss"), client, subject)
+            if agent is None:
+                return None
+            return WorkloadAccessToken(**access.model_dump(), wiki_subject=agent)
+        # Reserve the local agent namespace for credentials issued by this server.
+        if subject.startswith("agent:"):
             return None
         return access

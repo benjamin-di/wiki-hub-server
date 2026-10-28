@@ -237,6 +237,8 @@ async def test_cancelled_git_write_is_drained_before_archive(service, monkeypatc
         entered.set()
         assert release.wait(10)
         events.append(operation)
+        if operation == "rollback":
+            return {"revision": "b" * 40, "restored": "a" * 40}
         return {"url": "synthetic", "username": "synthetic", "token": "synthetic"}
 
     monkeypatch.setattr(service.forgejo, "set_archived", lambda *a: events.append("archive"))

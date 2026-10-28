@@ -143,3 +143,49 @@ async def test_application_ingest_uses_standalone_worker_and_preserves_originals
     assert "09:30" in page["content"] and f"reference/{job['id']}.txt" in page["content"]
     path = f"raw/{job['id']}-source.txt"
     assert service.git.original(service.state.wiki("starter"), path).read_bytes() == original
+
+
+def test_large_unrelated_page_is_omitted_and_complete_relevant_page_is_supplied(worker):
+    settings, work = worker
+    (work / "wiki/unrelated.md").write_text("Unrelated background\n" + "x" * 300_000)
+    related = "# Workshop\n\nThe workshop closes at 17:00. Source: raw/source.txt\n"
+    (work / "wiki/workshop.md").write_text(related)
+
+    def model(request):
+        supplied = json.loads(json.loads(request.content)["messages"][1]["content"])
+        assert supplied["files"]["wiki/workshop.md"] == related
+        assert "wiki/unrelated.md" in supplied["omitted_files"]
+        assert "wiki/unrelated.md" not in supplied["files"]
+        return httpx.Response(200, json=completion({"edits": [{
+            "path": "wiki/workshop.md", "content": related + "It opens at 09:30.\n"}]}))
+
+    with TestClient(create_app(settings, httpx.MockTransport(model))) as client:
+        result = client.post("/run", json={"run_id": IDENTIFIER, "vault": IDENTIFIER, "prompt": "File source."})
+    assert result.status_code == 200
+    assert "closes at 17:00" in (work / "wiki/workshop.md").read_text()
+    assert (work / "wiki/unrelated.md").stat().st_size > settings.context_limit
+
+
+def test_model_cannot_replace_a_page_it_did_not_receive(worker):
+    settings, work = worker
+    original = "x" * 300_000
+    (work / "wiki/large.md").write_text(original)
+    response = completion({"edits": [{"path": "wiki/new.md", "content": "New page"},
+                                      {"path": "wiki/large.md", "content": "Lost unrelated facts"}]})
+    with TestClient(create_app(settings, httpx.MockTransport(lambda _: httpx.Response(200, json=response)))) as client:
+        result = client.post("/run", json={"run_id": IDENTIFIER, "vault": IDENTIFIER, "prompt": "File source."})
+    assert result.status_code == 400 and "complete content" in result.json()["error"]
+    assert (work / "wiki/large.md").read_text() == original
+    assert not (work / "wiki/new.md").exists()
+
+
+def test_oversized_source_is_never_silently_truncated_or_sent_to_model(worker):
+    settings, work = worker
+    (work / f"reference/{IDENTIFIER}.txt").write_text("x" * 300_000)
+
+    def unexpected(_):
+        pytest.fail("Oversized source reached the model")
+
+    with TestClient(create_app(settings, httpx.MockTransport(unexpected))) as client:
+        result = client.post("/run", json={"run_id": IDENTIFIER, "vault": IDENTIFIER, "prompt": "File source."})
+    assert result.status_code == 400 and "context limit" in result.json()["error"]

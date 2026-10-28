@@ -28,6 +28,10 @@ class GitError(Exception):
     pass
 
 
+class PushRejected(GitError):
+    """Git received an explicit rejection for the requested remote ref."""
+
+
 def validate_slug(slug):
     if not isinstance(slug, str) or not SLUG.fullmatch(slug):
         raise ContentError("Use a wiki name beginning with a lowercase letter, followed by letters, digits or hyphens.")
@@ -94,6 +98,12 @@ class GitStore:
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise GitError(f"Git {args[0]} could not complete. Inspect the repository/job before retrying.") from exc
         if check and result.returncode:
+            if args[0] == "push" and "--porcelain" in args:
+                for line in result.stdout.splitlines():
+                    fields = line.split(b"\t", 2)
+                    if (len(fields) == 3 and fields[0] == b"!"
+                            and fields[2].startswith((b"[rejected]", b"[remote rejected]"))):
+                        raise PushRejected("Git rejected publication; inspect the retained working copy.")
             # Raw subprocess errors may contain server material; return a bounded operation label only.
             raise GitError(
                 f"Git {args[0]} failed (exit {result.returncode}). Inspect the repository/job before retrying."
@@ -165,8 +175,46 @@ class GitStore:
     def list_files(self, repo):
         return [p.decode() for p in self.run(repo, "ls-tree", "-r", "--name-only", "-z", "HEAD").split(b"\0") if p]
 
-    def read(self, repo, path):
-        return self.run(repo, "show", "HEAD:" + content_path(path))
+    def accepted_revision(self, repo, revision=None):
+        if revision is None:
+            return self.revision(repo)
+        if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise ContentError("Use a full Git commit hash from this wiki's accepted history.")
+        try:
+            self.run(repo, "merge-base", "--is-ancestor", revision, "HEAD")
+        except GitError:
+            raise ContentError("This revision is not in the wiki's accepted history.") from None
+        return revision
+
+    def read(self, repo, path, revision=None):
+        target = self.accepted_revision(repo, revision) if revision is not None else "HEAD"
+        return self.run(repo, "show", target + ":" + content_path(path))
+
+    def texts(self, repo, paths, revision):
+        # One Git process, with output spooled to disk rather than retaining the
+        # whole collection in application memory. NUL inputs preserve filenames.
+        if not paths:
+            return
+        requests = b"\0".join((revision + ":" + content_path(path)).encode() for path in paths) + b"\0"
+        with tempfile.TemporaryFile(dir=self.settings.state_dir) as stream:
+            self.run(repo, "cat-file", "--batch", "-z", input_data=requests, output_file=stream)
+            stream.seek(0)
+            for path in paths:
+                header = stream.readline().split()
+                if len(header) != 3 or header[1] != b"blob" or not header[2].isdigit():
+                    raise ContentError("A searchable path is not a regular Git blob.")
+                data = stream.read(int(header[2]))
+                if stream.read(1) != b"\n":
+                    raise ContentError("Git returned incomplete searchable content.")
+                try:
+                    yield path, data.decode("utf-8")
+                except UnicodeError:
+                    raise ContentError("Searchable Markdown and references must contain UTF-8 text.") from None
+
+    def accepted(self, wiki, revision):
+        repo = self.repo(wiki["slug"])
+        self.run(repo, "fetch", "origin", "main")
+        return self.run(repo, "merge-base", revision, "origin/main").decode().strip() == revision
 
     def worktree(self, wiki, job_id):
         repo = self.sync(wiki)
@@ -215,7 +263,8 @@ class GitStore:
             if path.split(b"/", 1)[0].decode() in CONTENT_DIRS and metadata.split()[0] not in (b"100644", b"100755"):
                 raise ContentError("Wiki content must contain regular files, without symlinks or nested repositories.")
 
-    def _push_commit(self, wiki, repo, work, base, validate_content=True):
+    def _push_commit(self, wiki, repo, work, base, validate_content=True, prepared=None, job_id=None):
+        edited = [p.decode() for p in self.run(work, "diff", "--name-only", "-z", base, "HEAD").split(b"\0") if p]
         self.lfs(work, wiki, "push", "origin", "HEAD", timeout=600)
         # A concurrent laptop push uses a normal merge; conflicts retain the worktree.
         self.run(work, "fetch", "origin", "main")
@@ -228,8 +277,12 @@ class GitStore:
             files = [p.encode() for p in self.list_files(work) if p.split("/", 1)[0] in CONTENT_DIRS]
             self._validate_files(work, files)
             self.validate_modes(work)
+            if job_id:
+                self.validate_citations(work, base, job_id, edited)
         revision = self.revision(work)
-        self.run(work, "push", "origin", "HEAD:main")
+        if prepared is not None:
+            prepared(revision)
+        self.run(work, "push", "--porcelain", "origin", "HEAD:main")
         # Canonical readers see a commit only after the remote accepted it.
         try:
             self.run(repo, "fetch", "origin", "main")
@@ -239,12 +292,26 @@ class GitStore:
             log.warning("Published revision %s; canonical refresh needs retry", revision)
         return revision
 
-    def publish(self, wiki, repo, work, base, subject, job_id):
+    def validate_citations(self, work, base, job_id, paths):
+        from .citations import validate_edits
+
+        available = set(self.list_files(work))
+        changed, previous = {}, {}
+        old_paths = {p.decode() for p in self.run(work, "ls-tree", "-r", "--name-only", "-z", base).split(b"\0") if p}
+        for path in paths:
+            if path in available and path.startswith(("wiki/", "output/")) and path.endswith(".md"):
+                changed[path] = self.run(work, "show", "HEAD:" + path).decode("utf-8")
+                if path in old_paths:
+                    previous[path] = self.run(work, "show", base + ":" + path).decode("utf-8")
+        reference = f"reference/{job_id}.txt"
+        validate_edits(changed, previous, available, reference if reference in available else None)
+
+    def publish(self, wiki, repo, work, base, subject, job_id, prepared=None):
         self.validate(work)
         self.run(work, "add", "--all", "--", *sorted(CONTENT_DIRS))
         self.validate_modes(work, staged=True)
         self.run(work, "commit", "-m", f"Ingest source\n\nPrincipal: {subject}\nJob: {job_id}")
-        return self._push_commit(wiki, repo, work, base)
+        return self._push_commit(wiki, repo, work, base, prepared=prepared, job_id=job_id)
 
     def cleanup(self, repo, work):
         # Only successful, application-owned worktrees are removed.
@@ -260,7 +327,7 @@ class GitStore:
             for line in raw.decode().splitlines()
         ]
 
-    def rollback(self, wiki, revision, subject):
+    def rollback(self, wiki, revision, subject, prepared=None, job_id=None):
         if not isinstance(revision, str) or not REVISION.fullmatch(revision):
             raise ContentError("Use a Git commit hash from this wiki's history.")
         repo = self.sync(wiki)
@@ -268,20 +335,23 @@ class GitStore:
         repo, work, base = self.worktree(wiki, "rollback-" + uuid4().hex)
         # An owner-requested rollback restores the complete historical wiki, including its instructions.
         self.run(work, "restore", "--source=" + revision, "--staged", "--worktree", ".")
-        self.run(work, "commit", "--allow-empty", "-m", f"Restore {revision}\n\nPrincipal: {subject}")
-        published = self._push_commit(wiki, repo, work, base, validate_content=False)
+        message = f"Restore {revision}\n\nPrincipal: {subject}"
+        if job_id:
+            message += f"\nJob: {job_id}"
+        self.run(work, "commit", "--allow-empty", "-m", message)
+        published = self._push_commit(wiki, repo, work, base, validate_content=False, prepared=prepared)
         try:
             self.cleanup(repo, work)
         except GitError:
             log.warning("Accepted rollback %s retained its working copy for cleanup", published)
         return {"revision": published, "restored": revision}
 
-    def original(self, wiki, path):
+    def original(self, wiki, path, revision=None):
         path = content_path(path)
         if not path.startswith("raw/"):
             raise ContentError("Only preserved source documents can be downloaded.")
         repo = self.sync(wiki)
-        pointer = self.read(repo, path)
+        pointer = self.read(repo, path, revision)
         match = LFS_POINTER.fullmatch(pointer)
         if not match:
             raise ContentError("The source is not a valid Git LFS document.")

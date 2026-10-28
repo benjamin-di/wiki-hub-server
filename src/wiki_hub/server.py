@@ -21,7 +21,7 @@ from .config import Settings
 from .forgejo import ForgejoError
 from .gitstore import ContentError, GitError
 from .mcp import create_mcp
-from .service import Denied, Service
+from .service import Busy, Denied, Service
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +118,10 @@ def create_app(settings=None, service=None, verifier=None):
                     data = await body(request)
                     return JSONResponse(await service.add_agent(caller, data["name"]), status_code=201,
                                         headers={"Cache-Control": "no-store"})
+            if path == ["agents", "workloads"] and request.method == "POST":
+                data = await body(request)
+                return JSONResponse(await service.add_workload_agent(caller, data["name"], data["client_id"]),
+                                    status_code=201, headers={"Cache-Control": "no-store"})
             if len(path) == 3 and path[0] == "agents" and path[2] == "revoke" and request.method == "POST":
                 return JSONResponse(await service.revoke_agent(caller, path[1]))
             if path == ["wikis"]:
@@ -137,7 +141,14 @@ def create_app(settings=None, service=None, verifier=None):
                     if operation == "pages":
                         return JSONResponse(await service.pages(caller, wiki))
                     if operation == "page":
-                        return JSONResponse(await service.read_page(caller, wiki, request.query_params["path"]))
+                        return JSONResponse(await service.read_page(
+                            caller, wiki, request.query_params["path"], request.query_params.get("revision"),
+                        ), headers={"Cache-Control": "no-store"})
+                    if operation == "jobs":
+                        return JSONResponse(await service.jobs(
+                            caller, wiki, request.query_params.get("status"),
+                            int(request.query_params.get("limit", "50")), request.query_params.get("before"),
+                        ), headers={"Cache-Control": "no-store"})
                     if operation == "search":
                         return JSONResponse(await service.search(
                             caller, wiki, request.query_params["q"], int(request.query_params.get("limit", "10")),
@@ -157,15 +168,23 @@ def create_app(settings=None, service=None, verifier=None):
                         service.allowed(caller, wiki)
                         async with service.lock(wiki):
                             row = service.allowed(caller, wiki)
-                            file = await asyncio.to_thread(service.git.original, row, request.query_params["path"])
+                            file = await asyncio.to_thread(service.git.original, row, request.query_params["path"],
+                                                           request.query_params.get("revision"))
                             service.allowed(caller, wiki)
+                        headers = {"Cache-Control": "no-store"}
+                        if request.query_params.get("revision") is not None:
+                            # original() has validated this exact accepted commit.
+                            headers["X-Wiki-Revision"] = request.query_params["revision"]
                         return FileResponse(file, filename=PurePosixPath(request.query_params["path"]).name,
-                                            headers={"Cache-Control": "no-store"})
+                                            headers=headers)
                 if request.method == "POST":
                     data = await body(request)
-                    if operation == "ingest":
+                    if operation in ("ingest", "submissions"):
+                        if operation == "submissions" and not isinstance(data.get("submission_id"), str):
+                            raise ContentError("A retained submission_id is required for this endpoint.")
                         return JSONResponse(await service.ingest(
                             caller, wiki, data["filename"], data["content_base64"], data.get("instructions", ""),
+                            data.get("submission_id"),
                         ), status_code=202)
                     if operation == "archive":
                         if type(data.get("archived")) is not bool:
@@ -190,6 +209,8 @@ def create_app(settings=None, service=None, verifier=None):
             return JSONResponse({"error": "No such operation."}, status_code=404)
         except Denied as exc:
             return JSONResponse({"error": str(exc)}, status_code=403)
+        except Busy as exc:
+            return JSONResponse({"error": str(exc)}, status_code=429, headers={"Retry-After": "30"})
         except ContentError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         except (ValueError, KeyError):

@@ -654,3 +654,124 @@ def test_client_askpass_refuses_foreign_lfs_hosts(tmp_path, monkeypatch):
     monkeypatch.setattr(cli.subprocess, "run", fake_git)
     cli.git_run(["fetch", "origin"], tmp_path, {"url": "https://git.example.test/repo",
                                              "username": "fixture-user", "token": "synthetic-secret"})
+
+def test_cli_workload_binding_uses_a_distinct_endpoint_and_writes_no_agent_key(tmp_path, monkeypatch, capsys):
+    store = cli.CredentialStore(tmp_path / "operator")
+    store.keyring = None
+    store.set_server("https://wiki.example.test")
+
+    class Caller:
+        def request(self, method, path, **kwargs):
+            assert method == "POST" and path == "/api/agents/workloads"
+            if not kwargs["json"]["client_id"]:
+                raise cli.CLIError("The workload client ID is empty.")
+            assert kwargs["json"] == {"name": "Source filer", "client_id": "source-filer"}
+            return {"id": "agent:fixture", "name": "Source filer", "workload": {"client_id": "source-filer"}}
+
+    monkeypatch.setattr(cli, "CredentialStore", lambda *_args: store)
+    monkeypatch.setattr(cli, "APIClient", lambda *_args: Caller())
+    assert cli.main(["agent", "add", "Source filer", "--workload-client", "source-filer"]) == 0
+    assert '"id": "agent:fixture"' in capsys.readouterr().out
+    assert not (store.directory / "agents").exists()
+    assert cli.main(["agent", "add", "Source filer", "--workload-client", "source-filer",
+                     "--directory", str(tmp_path / "unwanted")]) == 1
+    assert not (tmp_path / "unwanted").exists()
+    assert cli.main(["agent", "add", "Source filer", "--workload-client", ""]) == 1
+    assert not (store.directory / "agents").exists()
+
+
+def test_submission_id_is_retained_before_a_lost_reply_and_reuses_input(store, capsys):
+    requests = []
+    store.put(cli.oauth_key("https://wiki.example.test"),
+              {"access_token": "synthetic-access", "expires_at": time.time()+300})
+
+    def handle(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        records = list((store.directory / "submissions").glob("*.json"))
+        assert len(records) == 1
+        saved = json.loads(records[0].read_text())
+        assert saved["submission_id"] == body["submission_id"]
+        assert "synthetic-access" not in records[0].read_text()
+        if len(requests) == 1:
+            raise httpx.ReadTimeout("Synthetic lost reply", request=request)
+        return httpx.Response(200, json={"id": "same-job", "submission_id": body["submission_id"]})
+
+    client = cli.APIClient("https://wiki.example.test", store, httpx.Client(transport=httpx.MockTransport(handle)))
+    with pytest.raises(httpx.ReadTimeout):
+        client.submit("starter", "source.txt", "c291cmNl", submission_id="retained-id")
+    result = client.submit("starter", "source.txt", "c291cmNl", submission_id="retained-id")
+    assert result["id"] == "same-job" and requests[0] == requests[1]
+    with pytest.raises(cli.CLIError, match="different saved input"):
+        client.submit("starter", "source.txt", "ZGlmZmVyZW50", submission_id="retained-id")
+    assert len(requests) == 2
+    assert "retained-id" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("returned", ["b" * 40, None])
+async def test_pinned_cli_read_refuses_an_older_server_ignoring_revision(store, returned):
+    server = "https://wiki.example"
+    store.put(cli.oauth_key(server), {"access_token": "synthetic", "expires_at": time.time() + 1000})
+    wanted = "a" * 40
+
+    def handle(request):
+        assert request.url.params["revision"] == wanted
+        return httpx.Response(200, json={"path": "wiki/note.md", "content": "Current, unconfirmed text",
+                                         **({"revision": returned} if returned else {})})
+
+    client = cli.APIClient(server, store, httpx.Client(transport=httpx.MockTransport(handle)))
+    with pytest.raises(cli.CLIError, match="did not confirm the requested revision"):
+        await cli.HTTPService(client).read_page("cli", "pilot", "wiki/note.md", wanted)
+
+
+async def test_pinned_cli_read_returns_confirmed_evidence(store):
+    server = "https://wiki.example"
+    store.put(cli.oauth_key(server), {"access_token": "synthetic", "expires_at": time.time() + 1000})
+    wanted = "a" * 40
+    evidence = {"path": "wiki/note.md", "content": "Historical, confirmed text", "revision": wanted}
+    client = cli.APIClient(server, store, httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json=evidence))))
+    assert await cli.HTTPService(client).read_page("cli", "pilot", "wiki/note.md", wanted) == evidence
+
+
+@pytest.mark.parametrize("acknowledged", [None, "b" * 40, "a" * 40])
+def test_pinned_original_requires_matching_server_ack_before_creating_a_file(store, tmp_path, acknowledged):
+    server = "https://wiki.example"
+    store.put(cli.oauth_key(server), {"access_token": "synthetic", "expires_at": time.time() + 1000})
+    wanted = "a" * 40
+    original = b"Synthetic historical source bytes\x00\xff"
+
+    def handle(request):
+        assert request.url.params["revision"] == wanted
+        headers = {"X-Wiki-Revision": acknowledged} if acknowledged is not None else {}
+        return httpx.Response(200, content=original, headers=headers)
+
+    client = cli.APIClient(server, store, httpx.Client(transport=httpx.MockTransport(handle)))
+    target = tmp_path / "new-folder/original.bin"
+    if acknowledged == wanted:
+        client.download("pilot", "raw/original.bin", target, wanted)
+        assert target.read_bytes() == original
+    else:
+        with pytest.raises(cli.CLIError, match="No original was saved"):
+            client.download("pilot", "raw/original.bin", target, wanted)
+        assert not target.exists() and not target.parent.exists()
+
+
+def test_replay_required_submission_never_uses_an_older_servers_legacy_ingest(store):
+    server = "https://wiki.example"
+    store.put(cli.oauth_key(server), {"access_token": "synthetic", "expires_at": time.time() + 1000})
+    calls = []
+    model_calls = []
+
+    def older_server(request):
+        calls.append(request.url.path)
+        if request.url.path.endswith("/ingest"):
+            model_calls.append(True)
+            return httpx.Response(202, json={"id": "unsafe-unkeyed-job"})
+        return httpx.Response(404)
+
+    client = cli.APIClient(server, store, httpx.Client(transport=httpx.MockTransport(older_server)))
+    with pytest.raises(cli.CLIError, match="HTTP 404"):
+        client.submit("pilot", "note.txt", "eA==", submission_id="retained-id")
+    assert calls == ["/api/wikis/pilot/submissions"] and model_calls == []
+    assert len(list((store.directory / "submissions").glob("*.json"))) == 1

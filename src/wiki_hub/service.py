@@ -4,9 +4,11 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import json
 import logging
 import re
 import secrets
+import sqlite3
 import subprocess
 import uuid
 from pathlib import Path
@@ -14,7 +16,8 @@ from pathlib import Path
 import httpx
 
 from .forgejo import Forgejo
-from .gitstore import ContentError, GitStore, content_path, validate_slug
+from .gitstore import ContentError, GitError, GitStore, PushRejected, content_path, validate_slug
+from .search import SearchIndex
 from .state import State
 
 log = logging.getLogger(__name__)
@@ -23,6 +26,10 @@ ARCHIVE_STATES = {"archiving", "archived", "reopening"}
 
 
 class Denied(Exception):
+    pass
+
+
+class Busy(ContentError):
     pass
 
 
@@ -104,6 +111,7 @@ class Service:
         self.write_locks = {}
         self.access_locks = {}
         self.copy_lock = asyncio.Lock()
+        self.admission_lock = asyncio.Lock()
         self.model_slot = asyncio.Semaphore(1)
         self.tasks = set()
         self.closing = False
@@ -292,6 +300,8 @@ class Service:
         if (not isinstance(recipient, str) or not 1 <= len(recipient) <= 200
                 or any(c.isspace() or ord(c) < 32 for c in recipient)):
             raise ContentError("Use the exact subject from the recipient's wiki whoami command.")
+        if recipient.startswith("client-") and role != "none":
+            raise ContentError("Share with the registered agent ID, not its signed workload subject.")
         async with self.copy_lock, self.access_lock(slug):
             wiki = self.allowed(subject, slug, "admin")
             if recipient == wiki["owner"]:
@@ -351,18 +361,36 @@ class Service:
                               "permissions": permissions,
                               "local_copies": not subject.startswith("agent:")
                               and self.state.copies_allowed(subject, row["slug"])})
+        binding = self.state.workload_binding(subject)
         return {"subject": subject, "owner": subject == self.settings.owner_subject,
-                "credential_type": "agent_key" if subject.startswith("agent:") else "oauth", "wikis": wikis}
+                "credential_type": "workload" if binding else "agent_key" if subject.startswith("agent:") else "oauth",
+                "wikis": wikis, **({"identity": binding} if binding else {})}
 
     async def add_agent(self, subject, name):
+        self.require_agent_registration(subject, name)
+        identifier, token = "agent:" + uuid.uuid4().hex, "whagent_" + secrets.token_urlsafe(32)
+        self.state.add_agent(identifier, subject, name, token)
+        return {**self.state.agent(identifier), "credential": token}
+
+    def require_agent_registration(self, subject, name):
         self.require_active(subject)
         if not self.settings.owner_subject or subject != self.settings.owner_subject:
             raise Denied("Only the configured owner can register agents in this release.")
         if not isinstance(name, str) or not 1 <= len(name) <= 120 or any(ord(c) < 32 for c in name):
             raise ContentError("Give the agent a name of 1–120 characters on one line.")
-        identifier, token = "agent:" + uuid.uuid4().hex, "whagent_" + secrets.token_urlsafe(32)
-        self.state.add_agent(identifier, subject, name, token)
-        return {**self.state.agent(identifier), "credential": token}
+
+    async def add_workload_agent(self, subject, name, client_id):
+        self.require_agent_registration(subject, name)
+        if (not isinstance(client_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}", client_id)
+                or client_id == self.settings.oidc_client_id or not self.settings.oidc_issuer):
+            raise ContentError("Use the exact configured Pocket ID workload client ID.")
+        identifier = "agent:" + uuid.uuid4().hex
+        try:
+            self.state.add_workload_agent(identifier, subject, name, self.settings.oidc_issuer,
+                                          client_id, "client-" + client_id)
+        except sqlite3.IntegrityError:
+            raise ContentError("This workload is already registered, including if it was revoked.") from None
+        return self.state.agent(identifier)
 
     async def agents(self, subject):
         self.require_active(subject)
@@ -416,7 +444,7 @@ class Service:
             "pages": [p for p in paths if p.startswith("wiki/") and p.endswith(".md")],
         }
 
-    async def read_page(self, subject, wiki, path):
+    async def read_page(self, subject, wiki, path, revision=None):
         self.allowed(subject, wiki)
         path = content_path(path)
         if not path.endswith((".md", ".txt", ".json", ".yaml", ".yml", ".csv")) or path.startswith("raw/"):
@@ -424,12 +452,14 @@ class Service:
         async with self.lock(wiki):
             row = self.allowed(subject, wiki)
             repo = await asyncio.to_thread(self.git.sync, row)
-            text = (await asyncio.to_thread(self.git.read, repo, path)).decode("utf-8")
-            revision = await asyncio.to_thread(self.git.revision, repo)
+            revision = await asyncio.to_thread(self.git.accepted_revision, repo, revision)
+            text = (await asyncio.to_thread(self.git.read, repo, path, revision)).decode("utf-8")
             self.allowed(subject, wiki)
         # The first release permits full bounded pages; callers can search for relevant passages.
         if len(text) > 2_000_000:
-            raise ContentError("Use search to retrieve passages from this large source.")
+            if path.startswith(("wiki/", "reference/")) and path.endswith((".md", ".txt")):
+                raise ContentError("Use search to retrieve passages from this large source.")
+            raise ContentError("This artifact exceeds the text-read limit. Open it in an authorized local copy.")
         return {"wiki": wiki, "path": path, "revision": revision, "content": text}
 
     async def search(self, subject, wiki, query, limit=10):
@@ -443,6 +473,18 @@ class Service:
             row = self.allowed(subject, wiki)
             repo = await asyncio.to_thread(self.git.sync, row)
             revision = await asyncio.to_thread(self.git.revision, repo)
+            index = SearchIndex(self.settings, wiki)
+            try:
+                results = await asyncio.to_thread(index.search, self.git, repo, revision, terms, int(limit))
+            except (sqlite3.Error, OSError, GitError):
+                try:
+                    index.discard()
+                except OSError:
+                    pass
+                log.warning("Derived search unavailable for %s; scanning accepted content", wiki)
+            else:
+                self.allowed(subject, wiki)
+                return {"wiki": wiki, "revision": revision, "results": results}
             files = await asyncio.to_thread(self.git.list_files, repo)
             results = []
             for path in files:
@@ -470,7 +512,7 @@ class Service:
         results.sort(key=lambda item: (-item["score"], item["path"]))
         return {"wiki": wiki, "revision": revision, "results": results[: int(limit)]}
 
-    async def ingest(self, subject, wiki, filename, content_base64, instructions=""):
+    async def ingest(self, subject, wiki, filename, content_base64, instructions="", submission_id=None):
         if self.closing:
             raise ContentError("The server is stopping. Retry this source after it is available again.")
         self.allowed(subject, wiki, "contribute")
@@ -485,17 +527,70 @@ class Service:
             raise ContentError("The source is not valid base64.") from None
         if not data or len(data) > self.settings.upload_limit:
             raise ContentError("The source is empty or exceeds the configured upload limit.")
-        job_id = uuid.uuid4().hex
-        source_dir = self.settings.state_dir / "sources" / job_id
-        source_dir.mkdir(parents=True, mode=0o700)
-        source = source_dir / filename
-        source.write_bytes(data)
-        source.chmod(0o600)
-        self.state.add_job(job_id, wiki, subject, filename, str(source), instructions)
-        task = asyncio.create_task(self.process(job_id))
-        self.tasks.add(task)
-        task.add_done_callback(self.tasks.discard)
-        return self.state.public_job(job_id)
+        if submission_id is None:
+            submission_id = uuid.uuid4().hex
+        if not isinstance(submission_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", submission_id):
+            raise ContentError("Use a submission ID of 1–128 letters, digits, dots, colons, dashes or underscores.")
+        fingerprint = hashlib.sha256(json.dumps(
+            [filename, instructions, hashlib.sha256(data).hexdigest()], ensure_ascii=False,
+        ).encode()).hexdigest()
+        async with self.admission_lock:
+            if self.closing:
+                raise ContentError("The server is stopping. Retry this source after it is available again.")
+            self.allowed(subject, wiki, "contribute")
+            existing = self.state.submission(subject, wiki, submission_id)
+            if existing:
+                if existing["fingerprint"] != fingerprint:
+                    raise ContentError("This submission ID was already used with different input.")
+                return await self.job(subject, existing["id"])
+            if self.state.pending_jobs() >= self.settings.max_pending_jobs:
+                raise Busy("The ingest queue is full. Retry later with the same submission ID.")
+            job_id = uuid.uuid4().hex
+            source_dir = self.settings.state_dir / "sources" / job_id
+            source_dir.mkdir(parents=True, mode=0o700)
+            source = source_dir / filename
+            source.write_bytes(data)
+            source.chmod(0o600)
+            self.state.add_job(job_id, wiki, subject, filename, str(source), instructions, submission_id, fingerprint)
+            task = asyncio.create_task(self.process(job_id))
+            self.tasks.add(task)
+            task.add_done_callback(self.tasks.discard)
+            return self.state.public_job(job_id)
+
+    def publication_prepared(self, job_id):
+        def prepared(revision):
+            self.state.update_job(job_id, "publishing", candidate_revision=revision)
+        return prepared
+
+    async def reconcile_publication(self, job_id):
+        job = self.state.job(job_id)
+        if job["status"] != "uncertain" or not job["candidate_revision"]:
+            return
+        async with self.lock(job["wiki"]):
+            job = self.state.job(job_id)
+            if job["status"] != "uncertain":
+                return
+            try:
+                accepted = await asyncio.to_thread(
+                    self.git.accepted, self.state.wiki(job["wiki"]), job["candidate_revision"],
+                )
+            except GitError:
+                return  # Observation failed. Never turn uncertainty into a model retry.
+            if accepted:
+                self.state.update_job(job_id, "completed", revision=job["candidate_revision"])
+            # Absence from one fetch is not a rejection acknowledgement: an
+            # interrupted remote receive-pack may still be processing the push.
+
+    async def publication_failed(self, job_id, error):
+        job = self.state.job(job_id)
+        if isinstance(error, PushRejected):
+            self.state.update_job(job_id, "failed", error=str(error))
+        elif job["candidate_revision"]:
+            self.state.update_job(job_id, "uncertain", error="Publication outcome is uncertain; inspect this job.")
+            await self.reconcile_publication(job_id)
+        elif job["status"] != "interrupted":
+            safe = str(error) if isinstance(error, (ContentError, Denied)) else "Job failed; inspect its working copy."
+            self.state.update_job(job_id, "failed", error=safe)
 
     async def run_model(self, work, job, raw_path, reference_path):
         prompt = (
@@ -578,6 +673,7 @@ class Service:
                             base,
                             job["subject"],
                             job_id,
+                            self.publication_prepared(job_id),
                         )
                     )
                     try:
@@ -603,18 +699,30 @@ class Service:
         except Exception as exc:
             # No raw provider/subprocess exception escapes to user-visible state or logs.
             log.warning("Job %s failed (%s)", job_id, type(exc).__name__)
-            safe_error = (
-                str(exc) if isinstance(exc, (ContentError, Denied)) else "Job failed; inspect its working copy."
-            )
-            if self.state.job(job_id)["status"] != "interrupted":
-                self.state.update_job(job_id, "failed", revision=revision, error=safe_error)
+            await self.publication_failed(job_id, exc)
 
     async def job(self, subject, jobid):
         job = self.state.job(jobid)
         if not job:
             raise Denied("No access to this job.")
         self.allowed(subject, job["wiki"])
+        await self.reconcile_publication(jobid)
+        self.allowed(subject, job["wiki"])
         return self.state.public_job(jobid)
+
+    async def jobs(self, subject, wiki, status=None, limit=50, before=None):
+        self.allowed(subject, wiki)
+        if status not in (None, "queued", "running", "publishing", "uncertain", "completed", "failed", "interrupted"):
+            raise ContentError("Choose a valid job status.")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ContentError("Choose a job limit from 1 to 100.")
+        rows = self.state.jobs(wiki, status, limit + 1, before)
+        result = [await self.job(subject, row["id"]) for row in rows[:limit]]
+        # Reconciliation can change a job's status; filters describe the returned state.
+        if status:
+            result = [row for row in result if row["status"] == status]
+        self.allowed(subject, wiki)
+        return {"wiki": wiki, "jobs": result, "next_before": rows[limit - 1]["id"] if len(rows) > limit else None}
 
     async def history(self, subject, wiki):
         self.allowed(subject, wiki)
@@ -625,14 +733,33 @@ class Service:
             return result
 
     async def rollback(self, subject, wiki, revision):
-        async with self.write_lock(wiki), self.access_lock(wiki), self.lock(wiki):
-            row = self.allowed(subject, wiki, "write")
-            publication = asyncio.create_task(asyncio.to_thread(self.git.rollback, row, revision, subject))
-            try:
-                return await asyncio.shield(publication)
-            except asyncio.CancelledError:
-                await publication
-                raise
+        job_id = None
+        try:
+            async with self.write_lock(wiki), self.access_lock(wiki), self.lock(wiki):
+                row = self.allowed(subject, wiki, "write")
+                job_id = uuid.uuid4().hex
+                self.state.add_job(job_id, wiki, subject, str(revision), "", "", kind="rollback")
+                self.state.update_job(job_id, "running")
+                publication = asyncio.create_task(asyncio.to_thread(
+                    self.git.rollback, row, revision, subject, self.publication_prepared(job_id), job_id,
+                ))
+                try:
+                    result = await asyncio.shield(publication)
+                except asyncio.CancelledError:
+                    result = await publication
+                    self.state.update_job(job_id, "completed", revision=result["revision"])
+                    raise
+                self.state.update_job(job_id, "completed", revision=result["revision"])
+                return {**result, "job_id": job_id}
+        except Exception as error:
+            if job_id is not None:
+                await self.publication_failed(job_id, error)
+                job = self.state.job(job_id)
+                if job["status"] == "completed":
+                    return {"revision": job["revision"], "restored": revision, "job_id": job_id}
+                if job["status"] == "uncertain":
+                    raise GitError(f"Rollback outcome is uncertain. Inspect job {job_id}.") from None
+            raise
 
     async def clone(self, subject, wiki, write=True):
         if subject.startswith("agent:"):

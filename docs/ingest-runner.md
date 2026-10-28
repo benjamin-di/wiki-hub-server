@@ -35,6 +35,15 @@ fallback, retry or API-account provisioning. Incomplete/refused responses and
 provider failures leave a visible failed job for inspection. The worker requests
 `store: false`; your provider's data-handling policy still applies.
 
+The context budget reserves the complete new extracted reference and root
+instructions, then selects whole wiki pages by lexical relevance within the
+remaining budget. Oversized or lower-ranked pages are explicitly omitted. The
+worker cannot replace an existing file whose complete content was not supplied.
+An oversized source is rejected rather than truncated; explicit splitting or
+conversion is required. Raising the budget alone does not establish scalability.
+Qualify collection sizes and source-backed results as described in the
+[roadmap](roadmap.md#c-useful-knowledge-and-reproducible-evidence).
+
 Sources: [Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
 and [structured output modes](https://developers.openai.com/api/docs/guides/structured-outputs).
 
@@ -55,3 +64,15 @@ Other outcomes do not publish. `/health` should include `active_runs` for backup
 coordination. External agent runners must independently restrict filesystem
 access to that one job's content directories and network access to their model
 APIs. Do not run a general-purpose command executor with server credentials.
+
+Qualify the configured worker's context selection and provider-attempt policy
+separately; the bundled worker's limits and single model request do not describe
+every external implementation. The Hub does not resubmit failed or uncertain jobs.
+
+The application validates new evidence citations in the final merged tree.
+Use Markdown links (percent-encode spaces or wrap the target in angle brackets),
+backtick `raw/` or `reference/` paths, or plain paths without whitespace.
+Source-derived prose needs evidence; navigation-only pages may link to other
+pages. Pre-existing broken citations are tolerated during unrelated edits, while
+new nonexistent targets prevent publication. Resolvable citations do not prove
+that the model's claims are supported; evaluate factual quality separately.

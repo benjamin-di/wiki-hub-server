@@ -22,6 +22,7 @@ class Settings:
     ingest_url: str = ""
     ingest_tier: str = "daily"
     upload_limit: int = 32 * 1024 * 1024
+    max_pending_jobs: int = 32
 
     @classmethod
     def from_env(cls):
@@ -42,4 +43,5 @@ class Settings:
             ingest_url=os.environ["WIKI_INGEST_URL"].rstrip("/"),
             ingest_tier=os.environ.get("WIKI_INGEST_TIER", "daily"),
             upload_limit=int(os.environ.get("WIKI_UPLOAD_LIMIT", 32 * 1024 * 1024)),
+            max_pending_jobs=int(os.environ.get("WIKI_MAX_PENDING_JOBS", 32)),
         )

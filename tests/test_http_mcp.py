@@ -4,7 +4,7 @@ import threading
 
 import httpx
 import pytest
-from fastmcp import Client
+from fastmcp import Client, FastMCP
 from fastmcp.server.auth import AccessToken, TokenVerifier
 from starlette.testclient import TestClient
 
@@ -172,3 +172,73 @@ async def test_mcp_grant_changes_apply_to_existing_client(service):
         assert (await client.call_tool("wiki_list")).data == []
         assert (await client.call_tool("wiki_read", {"wiki": "starter", "path": "wiki/index.md"},
                                        raise_on_error=False)).is_error
+
+
+async def test_http_submission_jobs_and_pinned_evidence_with_current_grants(settings, service):
+    app = create_app(settings, service, FixtureVerifier())
+    owner = {"Authorization": "Bearer owner-token"}
+    reader = {"Authorization": "Bearer stranger-token"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://wiki.example.test",
+    ) as client:
+        await client.post("/api/wikis", headers=owner, json={"slug": "starter", "title": "Starter"})
+        submitted = {"filename": "source.txt", "content_base64": base64.b64encode(b"Opens 09:30").decode(),
+                     "submission_id": "http-request"}
+        missing = await client.post("/api/wikis/starter/submissions", headers=owner,
+                                    json={k: v for k, v in submitted.items() if k != "submission_id"})
+        assert missing.status_code == 400 and not service.state.jobs("starter")
+        first = (await client.post("/api/wikis/starter/submissions", headers=owner, json=submitted)).json()
+        replay = (await client.post("/api/wikis/starter/ingest", headers=owner, json=submitted)).json()
+        assert replay["id"] == first["id"]
+        await asyncio.gather(*service.tasks)
+        listing = await client.get("/api/wikis/starter/jobs", headers=owner)
+        assert listing.headers["cache-control"] == "no-store"
+        assert listing.json()["jobs"][0]["id"] == first["id"]
+        result = (await client.get("/api/wikis/starter/search?q=09:30", headers=owner)).json()
+        revision = result["revision"]
+        await client.post("/api/wikis/starter/rollback", headers=owner,
+                          json={"revision": (await service.history("owner", "starter"))[-1]["revision"]})
+        page = await client.get("/api/wikis/starter/page", headers=owner,
+                                params={"path": "wiki/workshop.md", "revision": revision})
+        assert page.status_code == 200 and page.json()["revision"] == revision
+        params = {"path": f"raw/{first['id']}-source.txt", "revision": revision}
+        download = await client.get("/api/wikis/starter/document", headers=owner, params=params)
+        assert download.content == b"Opens 09:30"
+        assert download.headers["X-Wiki-Revision"] == revision
+        await service.share("owner", "starter", "stranger", "read")
+        assert (await client.get("/api/wikis/starter/document", headers=reader, params=params)).status_code == 200
+        await service.share("owner", "starter", "stranger", "none")
+        assert (await client.get("/api/wikis/starter/document", headers=reader, params=params)).status_code == 403
+        assert (await client.get("/api/wikis/starter/jobs", headers=reader)).status_code == 403
+
+
+async def test_connected_mcp_supports_submission_replay_listing_and_historical_reads(service):
+    await service.create("owner", "starter", "Starter")
+    async with Client(create_mcp(service, subject_provider=lambda: "owner")) as client:
+        params = {"wiki": "starter", "filename": "source.txt", "content_base64": base64.b64encode(b"09:30").decode(),
+                  "submission_id": "mcp-request"}
+        first = (await client.call_tool("wiki_ingest", params)).data
+        replay = (await client.call_tool("wiki_ingest", params)).data
+        assert first["id"] == replay["id"]
+        await asyncio.gather(*service.tasks)
+        listing = (await client.call_tool("wiki_jobs", {"wiki": "starter"})).data
+        revision = listing["jobs"][0]["revision"]
+        result = await client.call_tool("wiki_read", {"wiki": "starter", "path": "wiki/workshop.md",
+                                                     "revision": revision})
+        assert result.data["revision"] == revision and "09:30" in result.data["content"]
+
+
+async def test_pinned_server_sdk_rejects_a_new_submission_argument_on_a_legacy_tool():
+    # Exercise the server's pinned SDK, independently of newer client SDK tests.
+    older = FastMCP("Synthetic older tool signature")
+    invoked = []
+
+    @older.tool
+    async def wiki_ingest(wiki: str, filename: str, content_base64: str, instructions: str = "") -> dict:
+        invoked.append(True)
+        return {"id": "unkeyed-job"}
+
+    async with Client(older) as client:
+        result = await client.call_tool("wiki_ingest", {"wiki": "pilot", "filename": "note.txt",
+            "content_base64": "eA==", "submission_id": "retained-id"}, raise_on_error=False)
+    assert result.is_error and invoked == []

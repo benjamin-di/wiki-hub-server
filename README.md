@@ -18,7 +18,8 @@ Migration of existing knowledge is a separate step.
 - [Model worker](docs/ingest-runner.md): bring a compatible model endpoint or use
   an existing trusted sandbox.
 - [Operations](docs/operations.md): consistent backup, populated restore and upgrades.
-- [Roadmap](docs/roadmap.md): managed sync, agent integration and deterministic import.
+- [Roadmap and remaining work](docs/roadmap.md): implemented capabilities, rollout
+  acceptance and the boundary between knowledge and application state.
 - [Security](SECURITY.md) and [contributing](CONTRIBUTING.md).
 
 The bundled worker returns source-backed file edits without executing model
@@ -188,6 +189,12 @@ owner's current wiki grant. Revocation is checked by the API and on every MCP
 operation, including sessions already connected. An unfinished ingest cannot
 publish after its agent is revoked. A publication already underway is allowed
 to finish before revocation returns.
+
+An existing Pocket ID workload can instead use
+`wiki agent add source-filer --workload-client source-filer`. It starts with no
+wikis and uses the same explicit grants and owner ceiling, without another local
+secret. See [workload enrollment](docs/clients.md#pocket-id-workloads) for native
+OAuth setup, identity binding, diagnostics and revocation.
 
 ## Operations
 

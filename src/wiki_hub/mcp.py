@@ -46,14 +46,20 @@ def create_mcp(service, auth=None, subject_provider=None):
         return await call("search", wiki, query, limit)
 
     @mcp.tool(annotations=READ)
-    async def wiki_read(wiki: str, path: str) -> dict:
-        """Read a Markdown page or faithful extracted reference from a search result."""
-        return await call("read_page", wiki, path)
+    async def wiki_read(wiki: str, path: str, revision: str | None = None) -> dict:
+        """Read a page/reference; pass the search result's full revision for reproducible evidence."""
+        return await call("read_page", wiki, path, revision)
 
     @mcp.tool(annotations=WRITE)
-    async def wiki_ingest(wiki: str, filename: str, content_base64: str, instructions: str = "") -> dict:
-        """Submit a base64 PDF or UTF-8 source. Saves automatically; poll the returned job ID."""
-        return await call("ingest", wiki, filename, content_base64, instructions)
+    async def wiki_ingest(wiki: str, filename: str, content_base64: str, instructions: str = "",
+                          submission_id: str | None = None) -> dict:
+        """Submit a source. Retain submission_id; reuse after a lost reply without repeating model work."""
+        return await call("ingest", wiki, filename, content_base64, instructions, submission_id)
+
+    @mcp.tool(annotations=READ)
+    async def wiki_jobs(wiki: str, status: str | None = None, limit: int = 50, before: str | None = None) -> dict:
+        """Find retained jobs, including lost IDs and uncertain outcomes. Paginate with next_before."""
+        return await call("jobs", wiki, status, limit, before)
 
     @mcp.tool(annotations=READ)
     async def wiki_ingest_status(job_id: str) -> dict:

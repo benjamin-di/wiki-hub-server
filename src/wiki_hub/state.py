@@ -37,6 +37,10 @@ class State:
                     id TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL,
                     token_hash TEXT NOT NULL UNIQUE, revoked INTEGER NOT NULL DEFAULT 0,
                     created TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS agent_workloads (
+                    agent TEXT PRIMARY KEY REFERENCES agents(id), issuer TEXT NOT NULL,
+                    client_id TEXT NOT NULL, subject TEXT NOT NULL,
+                    UNIQUE(issuer,client_id), UNIQUE(issuer,subject));
                 CREATE TABLE IF NOT EXISTS copy_settings (
                     kind TEXT NOT NULL CHECK(kind IN ('user','wiki')), key TEXT NOT NULL,
                     enabled INTEGER NOT NULL, pending INTEGER NOT NULL, updated TEXT NOT NULL,
@@ -57,6 +61,14 @@ class State:
                 db.execute("INSERT INTO grants_next SELECT wiki,subject,role,pending,updated FROM grants")
                 db.execute("DROP TABLE grants")
                 db.execute("ALTER TABLE grants_next RENAME TO grants")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
+            for name, declaration in {
+                "submission_id": "TEXT", "fingerprint": "TEXT", "candidate_revision": "TEXT",
+                "kind": "TEXT NOT NULL DEFAULT 'ingest'",
+            }.items():
+                if name not in columns:
+                    db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS job_submissions ON jobs(wiki,subject,submission_id)")
         self.path.chmod(0o600)
 
     @contextmanager
@@ -114,6 +126,8 @@ class State:
 
     def recover(self):
         with self.connect() as db:
+            db.execute("UPDATE jobs SET status='uncertain',error=?,updated=? WHERE status='publishing'",
+                       ("Publication was interrupted. Checking accepted Git history is required.", now()))
             db.execute(
                 "UPDATE jobs SET status='interrupted', error=?, updated=? WHERE status IN ('queued','running')",
                 ("Server restarted. Inspect this job before resubmitting.", now()),
@@ -167,7 +181,40 @@ class State:
     def agent(self, identifier):
         with self.connect() as db:
             row = db.execute("SELECT id,owner,name,revoked,created FROM agents WHERE id=?", (identifier,)).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        binding = self.workload_binding(identifier)
+        if binding:
+            result["workload"] = binding
+        return result
+
+    def add_workload_agent(self, identifier, owner, name, issuer, client_id, subject):
+        with self.connect() as db:
+            # No local bearer exists for a workload. This cannot match a SHA-256
+            # credential hash, including after a rollback to a key-only release.
+            db.execute("INSERT INTO agents(id,owner,name,token_hash,created) VALUES(?,?,?,?,?)",
+                       (identifier, owner, name, "workload:" + identifier, now()))
+            db.execute("INSERT INTO agent_workloads(agent,issuer,client_id,subject) VALUES(?,?,?,?)",
+                       (identifier, issuer, client_id, subject))
+
+    def workload_binding(self, identifier):
+        with self.connect() as db:
+            row = db.execute("SELECT issuer,client_id,subject FROM agent_workloads WHERE agent=?",
+                             (identifier,)).fetchone()
         return dict(row) if row else None
+
+    def workload_agent(self, issuer, client_id, subject):
+        with self.connect() as db:
+            row = db.execute("""SELECT a.id FROM agent_workloads w JOIN agents a ON a.id=w.agent
+                WHERE w.issuer=? AND w.client_id=? AND w.subject=? AND a.revoked=0""",
+                             (issuer, client_id, subject)).fetchone()
+        return row["id"] if row else None
+
+    def is_workload_client(self, issuer, client_id):
+        with self.connect() as db:
+            return db.execute("SELECT 1 FROM agent_workloads WHERE issuer=? AND client_id=?",
+                              (issuer, client_id)).fetchone() is not None
 
     def token_agent(self, token):
         with self.connect() as db:
@@ -177,9 +224,14 @@ class State:
 
     def agents(self, owner):
         with self.connect() as db:
-            return [dict(row) for row in db.execute(
+            rows = [dict(row) for row in db.execute(
                 "SELECT id,owner,name,revoked,created FROM agents WHERE owner=? ORDER BY created,id", (owner,),
             )]
+        for row in rows:
+            binding = self.workload_binding(row["id"])
+            if binding:
+                row["workload"] = binding
+        return rows
 
     def revoke_agent(self, owner, identifier):
         with self.connect() as db:
@@ -210,31 +262,60 @@ class State:
         with self.connect() as db:
             db.execute("UPDATE wikis SET status=? WHERE slug=?", ("archived" if archived else "ready", slug))
 
-    def add_job(self, job_id, wiki, subject, filename, source_path, instructions):
+    def add_job(self, job_id, wiki, subject, filename, source_path, instructions,
+                submission_id=None, fingerprint=None, kind="ingest"):
         stamp = now()
         with self.connect() as db:
             db.execute(
-                "INSERT INTO jobs(id,wiki,subject,filename,source_path,instructions,status,created,updated) "
-                "VALUES(?,?,?,?,?,?,'queued',?,?)",
-                (job_id, wiki, subject, filename, source_path, instructions, stamp, stamp),
+                "INSERT INTO jobs(id,wiki,subject,filename,source_path,instructions,status,created,updated,"
+                "submission_id,fingerprint,kind) VALUES(?,?,?,?,?,?,'queued',?,?,?,?,?)",
+                (job_id, wiki, subject, filename, source_path, instructions, stamp, stamp,
+                 submission_id, fingerprint, kind),
             )
+
+    def submission(self, subject, wiki, identifier):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM jobs WHERE subject=? AND wiki=? AND submission_id=?",
+                             (subject, wiki, identifier)).fetchone()
+        return dict(row) if row else None
+
+    def pending_jobs(self):
+        with self.connect() as db:
+            query = "SELECT count(*) FROM jobs WHERE status IN ('queued','running','publishing')"
+            return db.execute(query).fetchone()[0]
+
+    def jobs(self, wiki, status=None, limit=50, before=None):
+        query, values = "SELECT * FROM jobs WHERE wiki=?", [wiki]
+        with self.connect() as db:
+            if status:
+                query += " AND status=?"
+                values.append(status)
+            if before:
+                cursor = db.execute("SELECT created,id FROM jobs WHERE wiki=? AND id=?", (wiki, before)).fetchone()
+                if cursor is None:
+                    raise ValueError("Invalid job cursor")
+                query += " AND (created,id) < (?,?)"
+                values.extend(cursor)
+            return [dict(row) for row in db.execute(query + " ORDER BY created DESC,id DESC LIMIT ?",
+                                                    [*values, limit])]
 
     def job(self, job_id):
         with self.connect() as db:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         return dict(row) if row else None
 
-    def update_job(self, job_id, status, revision=None, error=None):
+    def update_job(self, job_id, status, revision=None, error=None, candidate_revision=None):
         with self.connect() as db:
             db.execute(
-                "UPDATE jobs SET status=?,revision=COALESCE(?,revision),error=?,updated=? WHERE id=?",
-                (status, revision, error, now(), job_id),
+                "UPDATE jobs SET status=?,revision=COALESCE(?,revision),candidate_revision="
+                "COALESCE(?,candidate_revision),error=?,updated=? WHERE id=?",
+                (status, revision, candidate_revision, error, now(), job_id),
             )
 
     def public_job(self, job_id):
         row = self.job(job_id)
         if row:
-            return {k: v for k, v in row.items() if k not in ("source_path", "subject", "instructions")}
+            return {k: v for k, v in row.items() if k not in ("source_path", "subject", "instructions", "fingerprint")}
         return None
 
 

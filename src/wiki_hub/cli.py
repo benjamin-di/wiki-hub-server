@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import hashlib
 import json
@@ -305,16 +306,44 @@ class APIClient:
         finally:
             response.close()
 
-    def download(self, wiki: str, path: str, destination: Path) -> None:
+    def submit(self, wiki: str, filename: str, content_base64: str, instructions: str = "",
+               submission_id: str | None = None):
+        identifier = submission_id if submission_id is not None else uuid.uuid4().hex
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", identifier):
+            raise CLIError("Use a submission ID of 1–128 letters, digits, dots, colons, dashes or underscores.")
+        record = {"server": self.server, "wiki": wiki, "submission_id": identifier, "filename": filename,
+                  "fingerprint": hashlib.sha256(json.dumps([content_base64, instructions]).encode()).hexdigest()}
+        key = hashlib.sha256(json.dumps([self.server, wiki, identifier]).encode()).hexdigest()
+        with self.store.locked():
+            directory = self.store.directory / "submissions"
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path = directory / (key + ".json")
+            try:
+                with path.open("x", encoding="utf-8") as stream:
+                    path.chmod(0o600)
+                    json.dump(record, stream)
+            except FileExistsError:
+                if path.is_symlink() or json.loads(path.read_text()) != record:
+                    raise CLIError("Submission ID has different saved input; inspect it first.") from None
+        print(f"Submission ID: {identifier} (reuse --submission-id after a lost reply)", file=sys.stderr)
+        return self.request("POST", f"/api/wikis/{wiki}/submissions", json={
+            "filename": filename, "content_base64": content_base64,
+            "instructions": instructions, "submission_id": identifier,
+        })
+
+    def download(self, wiki: str, path: str, destination: Path, revision: str | None = None) -> None:
         """Save an original through the authenticated API without replacing a local file."""
         destination = destination.expanduser().absolute()
         if destination.exists():
             raise CLIError("Choose a new output file; the destination already exists.")
-        response = self._response(
-            "GET", f"/api/wikis/{wiki}/document", stream=True, params={"path": path}
-        )
+        params = {"path": path}
+        if revision is not None:
+            params["revision"] = revision
+        response = self._response("GET", f"/api/wikis/{wiki}/document", stream=True, params=params)
         created = False
         try:
+            if revision is not None and response.headers.get("X-Wiki-Revision") != revision:
+                raise CLIError("The server did not confirm the requested revision. No original was saved.")
             destination.parent.mkdir(parents=True, exist_ok=True)
             descriptor = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             created = True
@@ -401,18 +430,29 @@ class HTTPService:
     async def pages(self, subject: str, wiki: str):
         return self.client.request("GET", f"/api/wikis/{wiki}/pages")
 
-    async def read_page(self, subject: str, wiki: str, path: str):
-        return self.client.request("GET", f"/api/wikis/{wiki}/page", params={"path": path})
+    async def read_page(self, subject: str, wiki: str, path: str, revision: str | None = None):
+        params = {"path": path}
+        if revision is not None:
+            params["revision"] = revision
+        result = self.client.request("GET", f"/api/wikis/{wiki}/page", params=params)
+        if revision is not None and (not isinstance(result, dict) or result.get("revision") != revision):
+            raise CLIError("The server did not confirm the requested revision. No pinned read was returned.")
+        return result
 
     async def search(self, subject: str, wiki: str, query: str, limit: int = 10):
         return self.client.request("GET", f"/api/wikis/{wiki}/search", params={"q": query, "limit": limit})
 
-    async def ingest(self, subject: str, wiki: str, filename: str, content_base64: str, instructions: str = ""):
-        return self.client.request(
-            "POST",
-            f"/api/wikis/{wiki}/ingest",
-            json={"filename": filename, "content_base64": content_base64, "instructions": instructions},
-        )
+    async def ingest(self, subject: str, wiki: str, filename: str, content_base64: str, instructions: str = "",
+                     submission_id: str | None = None):
+        return self.client.submit(wiki, filename, content_base64, instructions, submission_id)
+
+    async def jobs(self, subject: str, wiki: str, status=None, limit=50, before=None):
+        params = {"limit": str(limit)}
+        if status is not None:
+            params["status"] = status
+        if before is not None:
+            params["before"] = before
+        return self.client.request("GET", f"/api/wikis/{wiki}/jobs", params=params)
 
     async def job(self, subject: str, jobid: str):
         return self.client.request("GET", f"/api/jobs/{jobid}")
@@ -684,6 +724,7 @@ def parser() -> argparse.ArgumentParser:
     add_agent = agents.add_parser("add")
     add_agent.add_argument("name")
     add_agent.add_argument("--directory", type=Path, help="New private configuration directory for this agent")
+    add_agent.add_argument("--workload-client", help="Bind an existing Pocket ID workload; issues no local key")
     agents.add_parser("list")
     revoke_agent = agents.add_parser("revoke")
     revoke_agent.add_argument("id")
@@ -698,8 +739,15 @@ def parser() -> argparse.ArgumentParser:
     contribute.add_argument("wiki")
     contribute.add_argument("source", type=Path)
     contribute.add_argument("--instructions", default="")
+    contribute.add_argument("--submission-id", help="Reuse a retained submission ID after a lost reply")
     status = sub.add_parser("status")
     status.add_argument("job")
+    jobs = sub.add_parser("jobs", help="Find retained ingestion and rollback jobs")
+    jobs.add_argument("wiki")
+    jobs.add_argument("--status", choices=("queued", "running", "publishing", "uncertain", "completed", "failed",
+                                           "interrupted"))
+    jobs.add_argument("--limit", type=int, default=50)
+    jobs.add_argument("--before", help="Pagination cursor from next_before")
     search = sub.add_parser("search")
     search.add_argument("wiki")
     search.add_argument("query")
@@ -707,12 +755,14 @@ def parser() -> argparse.ArgumentParser:
     read = sub.add_parser("read")
     read.add_argument("wiki")
     read.add_argument("path")
+    read.add_argument("--revision", help="Full accepted commit hash returned by search")
     docs = sub.add_parser("docs", help="Download preserved original sources")
     documents = docs.add_subparsers(dest="docs_command", required=True)
     get = documents.add_parser("get", help="Save one original without overwriting a local file")
     get.add_argument("wiki")
     get.add_argument("path", help="Source path under raw/, as cited by the wiki")
     get.add_argument("--output", required=True, type=Path)
+    get.add_argument("--revision", help="Download the source bytes at this accepted commit")
     local = sub.add_parser("clone")
     local.add_argument("wiki")
     local.add_argument("directory", type=Path)
@@ -786,7 +836,7 @@ def main(argv: list[str] | None = None) -> int:
             clone(client, args.wiki, args.directory, read_only=args.read_only)
             return 0
         if args.command == "docs":
-            client.download(args.wiki, args.path, args.output)
+            client.download(args.wiki, args.path, args.output, args.revision)
             return 0
         if args.command == "mcp":
             from .mcp import create_mcp
@@ -797,6 +847,13 @@ def main(argv: list[str] | None = None) -> int:
             value = client.request("POST", "/api/wikis", json={"slug": args.slug, "title": args.title or args.slug})
         elif args.command == "agent":
             if args.agent_command == "add":
+                if args.workload_client is not None:
+                    if args.directory:
+                        raise CLIError("A workload keeps its existing identity configuration; omit --directory.")
+                    value = client.request("POST", "/api/agents/workloads",
+                                           json={"name": args.name, "client_id": args.workload_client})
+                    print(json.dumps(value, indent=2))
+                    return 0
                 directory = args.directory.expanduser().absolute() if args.directory else None
                 if directory and directory.exists():
                     raise CLIError("Choose a new private configuration directory for the agent.")
@@ -847,23 +904,21 @@ def main(argv: list[str] | None = None) -> int:
                 data["role"] = args.role
             value = client.request("POST", f"/api/wikis/{args.wiki}/{args.command}", json=data)
         elif args.command == "contribute":
-            value = client.request(
-                "POST",
-                f"/api/wikis/{args.wiki}/ingest",
-                json={
-                    "filename": args.source.name,
-                    "content_base64": base64.b64encode(args.source.read_bytes()).decode(),
-                    "instructions": args.instructions,
-                },
-            )
+            value = client.submit(args.wiki, args.source.name, base64.b64encode(args.source.read_bytes()).decode(),
+                                  args.instructions, args.submission_id)
         elif args.command == "status":
             value = client.request("GET", f"/api/jobs/{args.job}")
+        elif args.command == "jobs":
+            value = asyncio.run(HTTPService(client).jobs("cli", args.wiki, args.status, args.limit, args.before))
         elif args.command == "search":
             value = client.request(
                 "GET", f"/api/wikis/{args.wiki}/search", params={"q": args.query, "limit": args.limit}
             )
         elif args.command == "read":
-            value = client.request("GET", f"/api/wikis/{args.wiki}/page", params={"path": args.path})
+            params = {"path": args.path}
+            if args.revision is not None:
+                params["revision"] = args.revision
+            value = client.request("GET", f"/api/wikis/{args.wiki}/page", params=params)
             if isinstance(value, dict) and "content" in value:
                 print(value["content"])
                 return 0

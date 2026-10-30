@@ -16,6 +16,9 @@ The worker validates every edit before writing any file. Only text content
 under `wiki/` and `output/` can change; it rejects root files, originals,
 references, symlinks, duplicate paths and traversal. The application then checks
 preserved sources, file validity and the resulting Git tree before publishing.
+Any worker, including an external one, that changes or adds a file under `raw/`
+or `reference/` fails the job; only the application writes originals and
+extracted references. A completed job's staged copy of its source is removed.
 
 Required configuration:
 

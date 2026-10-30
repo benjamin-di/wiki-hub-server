@@ -3,13 +3,46 @@
 from __future__ import annotations
 
 import math
+import secrets
 import time
 from typing import Protocol
 
 from fastmcp.server.auth import AccessToken, JWTVerifier, TokenVerifier
+from fastmcp.server.dependencies import get_http_request
 from fastmcp.utilities.auth import decode_jwt_header
 
 WIKI_SCOPE = "wiki:access"
+
+
+class GatewayVerifier(TokenVerifier):
+    """Trust one explicitly configured gateway, only on its separate MCP transport.
+
+    The gateway authenticates a human and overwrites X-Wiki-Subject from their
+    verified immutable subject. Its backend credential authenticates that assertion;
+    neither a caller-supplied header alone nor a person's OAuth token suffices.
+    Wiki service operations still resolve current grants and suspension themselves.
+    """
+
+    def __init__(self, tokens: str):
+        super().__init__(required_scopes=[WIKI_SCOPE])
+        self.tokens = tuple(value.strip().encode() for value in tokens.split(","))
+        if any(len(value) < 32 for value in self.tokens):
+            raise ValueError("Gateway credentials must each contain at least 32 characters")
+
+    async def verify_token(self, token):
+        # Evaluate every configured key, including during rotation.
+        if not any([secrets.compare_digest(token.encode(), key) for key in self.tokens]):
+            return None
+        subjects = get_http_request().headers.getlist("x-wiki-subject")
+        if len(subjects) != 1:
+            return None
+        subject = subjects[0]
+        if (not subject or len(subject) > 255 or subject != subject.strip()
+                or not subject.isprintable() or "," in subject
+                or subject.startswith(("agent:", "client-"))):
+            return None
+        return AccessToken(token=token, client_id="trusted-gateway", subject=subject,
+                           scopes=[WIKI_SCOPE], claims={"sub": subject})
 
 
 class WorkloadAccessToken(AccessToken):

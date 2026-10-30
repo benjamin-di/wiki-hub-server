@@ -74,8 +74,10 @@ cases are critical; do not invent a missing answer to improve a score.
 For case 30, prepare an ordinary two-page text PDF containing a synthetic title
 on page 1 and the `pump-test.txt` statements on page 2. Verify the text and page
 boundary independently before ingestion. Cite the actual PDF/reference paths;
-do not assume that a model-supplied page number is correct. Scanned PDF/OCR
-acceptance is outside the current extraction contract.
+do not assume that a model-supplied page number is correct. PDF/image OCR is
+implemented, but this case qualifies ordinary text extraction. Add a separate
+scanned-document check against its preserved original and the configured OCR
+languages before relying on recognized values.
 
 ## Evaluate and recover
 

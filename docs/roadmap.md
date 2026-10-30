@@ -1,9 +1,38 @@
 # Roadmap and remaining work
 
-Updated 27 October 2026. This is the reusable product roadmap. Deployment
+Audited 30 October 2026. This is the reusable product roadmap. Deployment
 inventories, account bindings, legacy imports and acceptance receipts belong
 in private operations records. Source implementation, release publication and
 acceptance on an installation are separate milestones.
+
+## Immediate scope for agent knowledge
+
+The core MCP retrieval features are implemented: discovery instructions,
+cross-wiki lexical search, stemming/phrases/exclusions, title weighting, heading
+snippets, wiki overviews, file maps, numbered range reads and path suggestions.
+The latest retrieval fixes preserve small relevance scores, ignore unsupported
+Git filenames, search filenames during fallback, refresh overviews after direct
+pushes and recheck access before returning search outcomes.
+
+No additional core retrieval feature is required for the immediate agent workflow.
+Built-in MCP consultation instructions and a reusable
+[host-instruction example](clients.md#help-agents-consult-the-wiki) already exist.
+The optional trusted-gateway transport is implemented with a separate backend
+credential and current per-wiki authorization; it does not replace direct OAuth
+or scoped agent access.
+
+Keep remaining work small: release and verify the audited fixes; configure the
+actual consuming agent and fill obvious index gaps on its installation; then
+try a handful of everyday questions and fix concrete failures. Keep facts in
+their granted wikis and installation receipts in private operations records.
+The existing thirty synthetic cases remain available for broader qualification;
+an evaluation framework, separate profile system, maintenance linter and new
+retrieval infrastructure are not prerequisites.
+
+The broader qualification and optional workflows below remain separate. Qualify
+the actual consumer being adopted; unrelated Windows/SMB adoption does not block
+an agent workflow. Search remains lexical, fallback matching approximates FTS5,
+and scores from separate wiki indexes are not calibrated global relevance.
 
 ## Product standard and architecture
 
@@ -52,9 +81,11 @@ These capabilities exist in source, separately from installation acceptance.
 | Human access | Explicit read/contribute/write/admin grants; the configured owner creates wikis and registers agents |
 | Local copies | User/wiki copy settings, scoped Git credentials and current permission checks before synchronization |
 | Device sync | Single-copy and batch sync, opt-in discovery, exclusions, per-copy locks and structured failures |
+| Network drive | SMB drive per person following grants and copy policy; writers edit Markdown pages, published as attributed, merged commits with conflict copies; originals read-only; revocable device credentials; optional per-person writable inbox |
 | Agent access | Separately revocable keys or explicit Pocket ID workload bindings; read/contribute ceiling and no managed Git copies |
 | Offboarding | Local suspension blocks human sessions and owned agents; backend revocation remains pending until confirmed |
 | Archival | Reads and evidence retained, writes stopped, unfinished ingests interrupted and Git credentials revoked |
+| Intake support | Text/HTML, PDF and image OCR, email bodies and attachments; extraction preview; up to 20 source parts in one replayable HTTP submission; guarded undo of the caller's latest unmerged ingest |
 
 The source now includes the small correctness foundation; installation acceptance
 and populated quality measurements remain separate:
@@ -64,9 +95,16 @@ and populated quality measurements remain separate:
 - Submission IDs bind retries to one job. Candidate commits are journaled before
   push; uncertain outcomes reconcile against accepted history when queried.
 - Authorized job listing and bounded intake use the existing application/state.
-- Search fetches Git and uses a rebuildable SQLite FTS5 index at that accepted
-  revision; failure falls back to a content scan. Page/reference and original reads pin a full accepted revision
-  while enforcing current access.
+- Drive pages publish after independent quiet periods. Drive status includes
+  projected revisions, caller-specific publication jobs and page conflict copies.
+  Missing view metadata triggers manual recovery copies; writable views and their
+  base metadata remain part of the backup contract. See [network drive](drive.md).
+- Search fetches Git and uses a rebuildable, stemmed SQLite FTS5 index at that
+  accepted revision, across all readable wikis by default; failure falls back to
+  a content scan. Reads accept line ranges, and each wiki's `index.md` overview
+  describes it. Page/reference and original reads pin a full accepted revision
+  while enforcing current access. Server-side Git packing is bounded to stay
+  within the example container memory limits.
 - The bundled worker selects complete relevant pages within its default
   256,000-byte budget and rejects replacement of omitted existing files. Complete
   sources must fit. External workers need their own size/attempt qualification.
@@ -75,6 +113,28 @@ Implementation anchors: [publication and retrieval](../src/wiki_hub/service.py),
 [Git operations](../src/wiki_hub/gitstore.py), [job journal](../src/wiki_hub/state.py)
 and [bundled worker](../src/wiki_hub/runner.py). The milestones below retain the
 contracts and required evidence; implemented source alone does not close them.
+
+## Outstanding work after the source audit
+
+The recoverable journal, revision-pinned evidence, FTS5 search, whole-page context
+selection, native workload bindings and editable network drive are implemented.
+They are not a list of features still to build. The [source audit](audit.md)
+records the correctness fixes and their regression coverage separately from a
+release or installation claim.
+
+| Work | What remains |
+|---|---|
+| Drive recovery and diagnostics | Implementation is complete; qualify recovery of unpublished edits and base metadata, per-page quiet periods and caller-owned diagnostics on the installed release |
+| Optional writable inbox | Integrate a consent-aware intake consumer and enforce storage limits before exposing the share. The Hub provisions folders; it does not poll or file them |
+| Knowledge quality and operating size | Run the existing 30-case specification through the configured worker and consumer; record retrieval, attribution, OCR accuracy and resource/latency measurements |
+| Installed clients | Accept each actual Windows, second-person and hosted-client flow, including conflicts, sleep/resume and connected revocation. Source tests do not establish device adoption |
+| Delivery and recovery | Track each source release, public export and running image separately; confirm installed client identities and rehearse a populated restore including unpublished drive edits and current restrictions |
+
+Office conversion, voice transcription, self-service/group enrollment and new
+retrieval infrastructure remain deliberate deferrals. There is no general
+permanent-delete API: archive retains evidence, and denying local copies removes
+a wiki from the drive. Disposal of unregistered migration targets belongs in
+private operator tooling with its own identity and registration checks.
 
 ## Delivery sequence and dependencies
 
@@ -111,8 +171,8 @@ not establish acceptance of the outstanding workflows.
 
 ### B. Recoverable ingestion with a small durable journal
 
-Use existing SQLite jobs, Git job trailers and retained worktrees. Add the
-minimum durable fields and transitions to distinguish model work, publication
+The existing SQLite jobs, Git job trailers and retained worktrees distinguish
+model work, publication
 intent and an observed accepted revision. No external queue is needed.
 
 - Let CLI, API and MCP callers reuse a submission identifier scoped to actor
@@ -154,8 +214,8 @@ one representative populated collection through its actual consumer. Keep real
 evidence and receipts private. The service retrieves knowledge; answer quality
 also depends on the consuming agent and its prompt.
 
-**Evidence contract.** Add optional revision-pinned page/reference and original
-reads to existing API, MCP and CLI surfaces where applicable. Resolve full commit
+**Evidence contract.** Revision-pinned page/reference and original reads exist
+in API, MCP and CLI surfaces where applicable. Resolve full commit
 IDs only within that wiki's accepted main history. Search results, source locators
 and downloaded bytes must agree at the selected revision while current grants
 still apply. Test an intervening update, rollback and revocation. Imported legacy
@@ -168,7 +228,7 @@ evidence; navigation-only edits need not repeat every citation. Report existing
 broken links separately so one legacy link does not block unrelated work. Link
 existence cannot prove factual support; page numbers need real extraction locators.
 
-**Quality gate.** Expand the fixed corpus to at least 30 labelled questions:
+**Quality gate.** Execute the existing 30-case specification:
 ordinary facts, exact values/units/dates, paraphrases, conflicting accounts, dated
 corrections, absent information and source instruction attacks. Inspect generated
 pages as well as consumer answers. For the evaluated sample:
@@ -192,18 +252,20 @@ source/page/original, search latency, ingest duration, peak memory and worker
 context/output use for the pilot and next intended batch. Set accepted latency
 and resource budgets before qualification; retain measurements. Test writes and
 revocation while retrieval is busy. Text/PDF extraction limits and original
-download capacity are separate facts. Unsupported formats and scanned PDFs need
-explicit conversion; a general OCR/conversion platform is deferred.
+download capacity are separate facts. PDF/image OCR is implemented and its
+derived text is labelled for verification against the original. Qualify its
+configured languages and source quality separately; unsupported formats still
+need explicit conversion.
 
-If the bundled worker's whole-wiki budget is exceeded, implement bounded relevant
-page selection before declaring that collection writable. Supply complete target
+The bundled worker uses bounded relevant-page selection when a whole wiki does
+not fit. Qualify that selection before declaring a collection writable. Supply complete target
 pages before full-file replacement; never silently truncate a source or replace
 a page from a partial view. Oversized sources stay explicit failures requiring
 reviewed splitting/conversion. External workers must prove equivalent preservation
 and resource bounds without inheriting an assumed 256 KB limit.
 
-If scanning misses the agreed quality/latency budget, use a revision-keyed,
-rebuildable SQLite FTS5 index first; it supports [ranking and snippets](https://sqlite.org/fts5.html).
+The revision-keyed, rebuildable SQLite FTS5 index supplies
+[ranking and snippets](https://sqlite.org/fts5.html).
 Account for Git-client pushes and rollback, not just ingest commits. Return an
 explicit indexed revision or correct fallback while rebuilding; never label stale
 passages with a newer revision. Index failure cannot undo accepted Git data.
@@ -227,6 +289,13 @@ challenge requires POST; HEAD/GET are not authentication probes.
 Restrict alternate filesystem mounts and human credentials before claiming a
 workflow is confined to MCP grants. Move a real workflow before retiring its old
 access; normal deployment must not restore revoked bindings or grants.
+
+For the network drive, accept on each installed client: connect through the
+real file server, a grant appearing and an unshare disappearing without
+reconnecting, read-only originals, a page edited in a common editor publishing
+as the person, a deliberate conflict, sleep/resume and the private route. The
+inbox additionally needs its intake consumer and storage limits before it is
+offered.
 
 Use `wiki sync --all --root DIRECTORY --json`, adding `--discover` only when a
 device opts in. Existing schedulers are sufficient. Verify two-device edits,

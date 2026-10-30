@@ -6,7 +6,8 @@ before resubmitting; the service does not silently rerun model work.
 
 `WIKI_STATE_DIR/indexes` is a derived search cache and can be omitted from backups.
 Deleting it never deletes accepted Git/LFS content, grants or jobs. Queries
-rebuild it from accepted Git; index failure falls back to a correct content scan.
+rebuild it from accepted Git. Index failure falls back to a scan at that revision;
+the scan approximates FTS5 token matching and ranking, so result ordering can differ.
 
 A push reply or the subsequent journal update can be lost. The job records its
 candidate before pushing; restart changes `publishing` jobs to `uncertain`.
@@ -28,6 +29,14 @@ a shared identity provider needs independent backup ownership. Wiki backup or
 restore must never stop or overwrite shared production identity. Test combined
 recovery using an isolated restored provider. Keep identity encryption and backup
 decryption keys accessible separately from the server.
+
+When the network drive is enabled, include writers' editable views and parked
+pages together with their base metadata in application state. Stop SMB writes
+as well, or snapshot both stores consistently; see the [drive backup and recovery
+guidance](drive.md#configuration). Writable views can contain unpublished work
+and must not be discarded as a cache.
+Use the [saved-page checks](drive.md#check-a-saved-page) to distinguish a
+local save, a projected view and an accepted Git publication before recovery.
 
 Before relying on real knowledge, restore a populated backup into separate
 volumes. Compare file hashes, check each SQLite database, run `git fsck`, verify
@@ -82,3 +91,29 @@ SDK or the documented
 [authentication probe](clients.md#stateless-mcp-authentication-probes). Keep
 platform and hosted-client checks explicit. Record the evidence privately, and
 publish reusable instructions and synthetic examples only.
+
+## Network drive upgrade checks
+
+Record the Hub source revision and immutable image digest separately from the
+file server's configuration and the installed client version. Include editable
+views and their base metadata in the recovery point before an upgrade.
+
+1. With the drive enabled, fetch `/drive/windows` and
+   `/drive/windows?action=disconnect`. Both should return HTTP 200 and a
+   PowerShell script using the configured public Hub address and the requested
+   action. Unexpanded template placeholders indicate an incorrect response.
+2. From an actual Windows computer on the LAN or private route, approve the
+   browser sign-in and verify the Explorer mapping and saved credential. Check
+   the exact wiki list against that person's grants and local-copy settings.
+3. Check read-only originals and a reader's pages. With a writer on a disposable
+   acceptance wiki, save a Markdown edit, inspect its attributed publication job,
+   and exercise concurrent edits and conflict recovery. Check a save during
+   publication and reconnection after sleep.
+4. Revoke access while the drive is connected and confirm the file server denies
+   further access. Disconnect and repeat any pending revocation until the server
+   confirms it. Retain the acceptance results privately.
+
+HTTP 200 from the helper proves script delivery. It does not prove Windows
+Credential Manager, browser approval, SMB authentication or connected revocation
+on an installed computer. Keep those acceptance results explicit. See the
+[drive guide](drive.md#what-people-and-administrators-do) for the user commands.

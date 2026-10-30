@@ -15,6 +15,9 @@ Migration of existing knowledge is a separate step.
 - [Self-hosting](docs/self-hosting.md): a standalone Compose example with Forgejo
   17, Pocket ID and a restricted model worker.
 - [Clients](docs/clients.md): CLI, local MCP, hosted Claude/ChatGPT and agents.
+- [Network drive](docs/drive.md): one drive per person with exactly the wikis they
+  may read and editable pages where they may write, over SMB on a LAN or private route.
+  Windows connects with one PowerShell line and nothing to install.
 - [Model worker](docs/ingest-runner.md): bring a compatible model endpoint or use
   an existing trusted sandbox.
 - [Operations](docs/operations.md): consistent backup, populated restore and upgrades.
@@ -66,6 +69,9 @@ wiki user set RECIPIENT_SUBJECT --local-copies deny
 wiki user status RECIPIENT_SUBJECT
 wiki user suspend RECIPIENT_SUBJECT
 wiki user resume RECIPIENT_SUBJECT
+wiki drive connect
+wiki drive status
+wiki drive disconnect
 ```
 
 For a local MCP client, configure `wiki mcp` after signing in. The remote streamable
@@ -101,7 +107,7 @@ If Forgejo is unavailable during a permission change, API access for that share 
 denied and `wiki access` shows `pending: 1`. Git may retain its previous permission
 until Forgejo recovers. Repeat the same share/unshare command to finish; do not
 treat a failed permission command as successful revocation. This state survives
-restarts. Groups, invitations and expiring shares are later steps.
+restarts. Group synchronization, invitations and expiring shares are deferred.
 
 Git copies require both the person's and the wiki's local-copy settings to allow
 them. Both default to allow for existing installations. `wiki settings WIKI`

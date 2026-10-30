@@ -24,6 +24,31 @@ class FixtureVerifier(TokenVerifier):
         return None
 
 
+async def test_cancelled_original_download_holds_its_wiki_lock(settings, service, monkeypatch, tmp_path):
+    await service.create("owner", "starter", "Starter")
+    entered, release = threading.Event(), threading.Event()
+
+    def download(*args):
+        entered.set()
+        assert release.wait(10), "test did not release download"
+        return tmp_path / "unused.txt"
+
+    monkeypatch.setattr(service.git, "original", download)
+    app = create_app(settings, service, FixtureVerifier())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=settings.public_url) as client:
+        request = asyncio.create_task(client.get("/api/wikis/starter/document?path=raw/original.txt",
+                                                headers={"Authorization": "Bearer owner-token"}))
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            request.cancel()
+            await asyncio.sleep(0)
+            assert service.lock("starter").locked()
+        finally:
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+
+
 @pytest.mark.parametrize("waiting", ["lock", "download"])
 async def test_original_download_rechecks_access_after_waiting(settings, service, monkeypatch, tmp_path, waiting):
     await service.create("owner", "starter", "Starter")

@@ -107,13 +107,16 @@ async def test_workload_preserves_signed_identity_and_survives_state_reopen(serv
 
 
 @pytest.mark.parametrize("changes", [
-    {"sub": "client-other"}, {"sub": "owner"}, {"client_id": "other"}, {"exp": int(time.time()) + 3600},
+    {"sub": "client-other"}, {"sub": "owner"}, {"client_id": "other"}, {"exp": "an hour from now"},
     {"scope": "openid wiki:access"}, {"groups": ["administrators"]},
     {"iss": "https://other.example.test"}, {"aud": "https://other.example.test/mcp"},
 ])
 async def test_workload_rejects_mismatches_and_human_authority(service, identity, changes):
     oidc, issue = identity
     await service.add_workload_agent("owner", "Reader", "source-filer")
+    if changes.get("exp"):
+        # Computed when the test runs: a slow run must not shrink the lifetime under the limit.
+        changes = {"exp": int(time.time()) + 3600}
     raw = issue("client-source-filer", "source-filer", changes)
     assert await PrincipalVerifier(oidc, service.state).verify_token(raw) is None
 

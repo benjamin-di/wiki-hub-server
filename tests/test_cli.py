@@ -226,6 +226,50 @@ def test_interrupted_download_removes_the_incomplete_file(store, tmp_path):
     assert not target.exists()
 
 
+@pytest.mark.parametrize("body,detail", [(b'{"error":"No access to this wiki."}', "No access"),
+                                         (b"x" * 10000, "HTTP 403")], ids=["denied", "large-error-page"])
+def test_refused_streaming_download_reports_error_and_closes_response(store, tmp_path, body, detail):
+    class ErrorStream(httpx.SyncByteStream):
+        closed = False
+
+        def __iter__(self):
+            yield body
+
+        def close(self):
+            self.closed = True
+
+    server = "https://wiki.example.test"
+    store.put(cli.oauth_key(server), {"access_token": "synthetic", "expires_at": time.time() + 1000})
+    stream = ErrorStream()
+    with httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(403, stream=stream))) as http:
+        client = cli.APIClient(server, store, http)
+        target = tmp_path / "refused.txt"
+        with pytest.raises(cli.CLIError, match=detail):
+            client.download("starter", "raw/note.txt", target)
+    assert stream.closed and not target.exists()
+
+
+@pytest.mark.parametrize("pending", [True, False])
+@pytest.mark.parametrize("command", [["drive", "disconnect"], ["drive", "revoke", "drive-test"]])
+def test_cli_drive_revocation_exit_requires_server_confirmation(store, monkeypatch, command, pending):
+    from wiki_hub import drive_client
+
+    class Client:
+        server = "https://wiki.example.test"
+
+        def request(self, method, path):
+            assert (method, path) == ("POST", "/api/drive/devices/drive-test/revoke")
+            return {"id": "drive-test", "revoked": True, "pending": pending}
+
+    client = Client()
+    store.set_server(client.server)
+    drive_client._save_record(store, client.server, {"device": "drive-test", "unc": "\\\\files.example.test\\wikis"})
+    monkeypatch.setattr(drive_client, "WINDOWS", False)
+    monkeypatch.setattr(cli, "CredentialStore", lambda: store)
+    monkeypatch.setattr(cli, "APIClient", lambda *_args: client)
+    assert cli.main(command) == (1 if pending else 0)
+
+
 def git(directory, *arguments):
     return subprocess.run(["git", *arguments], cwd=directory, text=True, check=True, capture_output=True).stdout.strip()
 
@@ -775,3 +819,81 @@ def test_replay_required_submission_never_uses_an_older_servers_legacy_ingest(st
         client.submit("pilot", "note.txt", "eA==", submission_id="retained-id")
     assert calls == ["/api/wikis/pilot/submissions"] and model_calls == []
     assert len(list((store.directory / "submissions").glob("*.json"))) == 1
+
+
+async def test_cli_bridge_routes_cross_wiki_search_and_refuses_unconfirmed_ranges(store):
+    server = "https://wiki.example"
+    store.put(cli.oauth_key(server), {"access_token": "synthetic", "expires_at": time.time() + 1000})
+    seen = []
+
+    def handle(request):
+        seen.append(request.url.path)
+        return httpx.Response(200, json={"path": "wiki/note.md", "content": "Whole page", "revision": "a" * 40})
+
+    bridge = cli.HTTPService(cli.APIClient(server, store, httpx.Client(transport=httpx.MockTransport(handle))))
+    await bridge.search("cli", None, "aisle")
+    await bridge.search("cli", "pilot", "aisle")
+    assert seen == ["/api/search", "/api/wikis/pilot/search"]
+    with pytest.raises(cli.CLIError, match="line-range reads"):
+        await bridge.read_page("cli", "pilot", "wiki/note.md", None, 2, 3)
+
+
+async def test_cli_bridge_reports_server_error_text_and_old_server_search(store):
+    server = "https://wiki.example"
+    store.put(cli.oauth_key(server), {"access_token": "synthetic", "expires_at": time.time() + 1000})
+
+    def handle(request):
+        if request.url.path == "/api/search":
+            return httpx.Response(404, json={"error": "No such operation."})
+        return httpx.Response(400, json={"error": "No file wiki/x.md exists. Close matches: wiki/y.md."})
+
+    bridge = cli.HTTPService(cli.APIClient(server, store, httpx.Client(transport=httpx.MockTransport(handle))))
+    with pytest.raises(cli.CLIError, match="Close matches: wiki/y.md"):
+        await bridge.read_page("cli", "pilot", "wiki/x.md")
+    with pytest.raises(cli.CLIError, match="cannot search all wikis"):
+        await bridge.search("cli", None, "aisle")
+
+
+def bridge(store, seen):
+    server = "https://wiki.example"
+    store.put(cli.oauth_key(server), {"access_token": "synthetic", "expires_at": time.time() + 1000})
+
+    def handle(request):
+        seen.append(request.url.path)
+        return httpx.Response(200, json={"wiki": "pilot", "revision": "a" * 40, "pages": []})
+
+    return cli.HTTPService(cli.APIClient(server, store, httpx.Client(transport=httpx.MockTransport(handle))))
+
+
+@pytest.mark.parametrize("wiki", ["starter/clone?", "../agents/abc/revoke?", "pilot#x", "pilot/../jobs", ".."])
+async def test_cli_bridge_refuses_names_that_reach_other_endpoints(store, wiki):
+    seen = []
+    with pytest.raises(cli.CLIError, match="valid wiki"):
+        await bridge(store, seen).pages("cli", wiki)
+    with pytest.raises(cli.CLIError, match="valid wiki"):
+        await bridge(store, seen).job("cli", "../me/access")
+    assert seen == []
+
+
+async def test_cli_bridge_still_reaches_ordinary_names(store):
+    seen = []
+    await bridge(store, seen).pages("cli", "pilot-2")
+    assert seen == ["/api/wikis/pilot-2/pages"]
+
+
+def test_cli_writes_utf8_to_a_narrow_code_page_pipe(monkeypatch):
+    import io
+    import sys
+    narrow = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", narrow)
+    monkeypatch.setattr(cli, "CredentialStore", lambda: (_ for _ in ()).throw(cli.CLIError("stop")))
+    cli.main(["list"])
+    assert sys.stdout.encoding.lower().replace("-", "") == "utf8"
+
+
+def test_version_is_reported(capsys):
+    from wiki_hub import __version__
+
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["--version"])
+    assert stopped.value.code == 0 and capsys.readouterr().out.strip() == f"wiki {__version__}"

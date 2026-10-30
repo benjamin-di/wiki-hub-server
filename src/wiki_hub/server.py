@@ -1,29 +1,40 @@
 """HTTP API and OAuth-protected MCP endpoint in one application."""
 
-import asyncio
 import json
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
+from importlib.resources import files
 from pathlib import PurePosixPath
+from urllib.parse import urlsplit
 
 import uvicorn
 from fastmcp.server.auth import RemoteAuthProvider
 from pydantic import AnyHttpUrl, ConfigDict, TypeAdapter
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
 
 from . import __version__
-from .auth import WIKI_SCOPE, PrincipalVerifier, create_verifier, principal_subject
+from .auth import WIKI_SCOPE, GatewayVerifier, PrincipalVerifier, create_verifier, principal_subject
 from .config import Settings
+from .drive import DriveError, DriveUnavailable
 from .forgejo import ForgejoError
 from .gitstore import ContentError, GitError
 from .mcp import create_mcp
 from .service import Busy, Denied, Service
 
 log = logging.getLogger(__name__)
+
+
+def line_number(request, name):
+    value = request.query_params.get(name)
+    if value is None:
+        return None
+    if not value.isdigit():
+        raise ContentError(f"{name} must be a whole line number.")
+    return int(value)
 
 
 def create_app(settings=None, service=None, verifier=None):
@@ -43,10 +54,22 @@ def create_app(settings=None, service=None, verifier=None):
     )
     mcp = create_mcp(service, auth=auth)
     mcp_app = mcp.http_app(path="/mcp", stateless_http=True, json_response=True, host_origin_protection=False)
+    gateway_app = None
+    if settings.gateway_bearer_tokens:
+        gateway = create_mcp(service, auth=GatewayVerifier(settings.gateway_bearer_tokens), tool_prefix="")
+        gateway_app = gateway.http_app(path="/mcp", stateless_http=True, json_response=True,
+                                       host_origin_protection=True,
+                                       allowed_hosts=[urlsplit(settings.public_url).hostname,
+                                                      *settings.gateway_allowed_hosts],
+                                       allowed_origins=[settings.public_url])
 
     @asynccontextmanager
     async def lifespan(app):
-        async with mcp_app.lifespan(app):
+        async with AsyncExitStack() as stack:
+            await stack.enter_async_context(mcp_app.lifespan(app))
+            if gateway_app is not None:
+                await stack.enter_async_context(gateway_app.lifespan(app))
+            service.start()
             yield
         await service.shutdown()
 
@@ -58,6 +81,17 @@ def create_app(settings=None, service=None, verifier=None):
                              "resource": settings.oidc_audience,
                              "scope": "openid offline_access " + WIKI_SCOPE})
 
+    async def drive_windows(request):
+        # A public, secret-free script: `irm <server>/drive/windows | iex` connects a Windows computer.
+        if not settings.drive_enabled:
+            return PlainTextResponse("This server does not offer a network drive.", status_code=404)
+        action = request.query_params.get("action", "connect")
+        if action not in ("connect", "disconnect"):
+            return PlainTextResponse("action must be connect or disconnect.", status_code=400)
+        script = files("wiki_hub").joinpath("drive_windows.ps1").read_text()
+        script = script.replace("__WIKI_SERVER__", settings.public_url.replace("'", "''"))
+        return PlainTextResponse(script.replace("__WIKI_ACTION__", action), headers={"Cache-Control": "no-cache"})
+
     async def subject(request):
         raw = request.headers.get("authorization", "")
         kind, _, bearer = raw.partition(" ")
@@ -67,7 +101,9 @@ def create_app(settings=None, service=None, verifier=None):
         return principal_subject(token) if token else None
 
     async def body(request):
-        maximum = (settings.upload_limit + 2) // 3 * 4 + 8192
+        # Source bytes share one limit. Leave room for 20 filenames, a full
+        # 4,000-character instruction and JSON Unicode escapes/base64 padding.
+        maximum = (settings.upload_limit + 2) // 3 * 4 + 128 * 1024
         data = bytearray()
         async for chunk in request.stream():
             data.extend(chunk)
@@ -93,6 +129,8 @@ def create_app(settings=None, service=None, verifier=None):
             service.require_active(caller)
             if path == ["me"] and request.method == "GET":
                 return JSONResponse({"subject": caller, "owner": caller == settings.owner_subject})
+            if path == ["me", "inbox"] and request.method == "GET":
+                return JSONResponse(await service.inbox(caller), headers={"Cache-Control": "no-store"})
             if path == ["me", "access"] and request.method == "GET":
                 return JSONResponse(await service.effective_access(caller), headers={"Cache-Control": "no-store"})
             if path == ["users", "status"]:
@@ -120,8 +158,21 @@ def create_app(settings=None, service=None, verifier=None):
                                         headers={"Cache-Control": "no-store"})
             if path == ["agents", "workloads"] and request.method == "POST":
                 data = await body(request)
-                return JSONResponse(await service.add_workload_agent(caller, data["name"], data["client_id"]),
-                                    status_code=201, headers={"Cache-Control": "no-store"})
+                return JSONResponse(await service.add_workload_agent(
+                    caller, data["name"], data["client_id"], data.get("owner"),
+                ), status_code=201, headers={"Cache-Control": "no-store"})
+            if path == ["drive"] and request.method == "GET":
+                return JSONResponse(await service.drive_status(caller), headers={"Cache-Control": "no-store"})
+            if path == ["drive", "devices"]:
+                if request.method == "GET":
+                    return JSONResponse(await service.drive_devices(caller, request.query_params.get("subject")),
+                                        headers={"Cache-Control": "no-store"})
+                data = await body(request)
+                return JSONResponse(await service.add_drive_device(caller, data["name"]), status_code=201,
+                                    headers={"Cache-Control": "no-store"})
+            if len(path) == 4 and path[:2] == ["drive", "devices"] and path[3] == "revoke" and request.method == "POST":
+                return JSONResponse(await service.revoke_drive_device(caller, path[2]),
+                                    headers={"Cache-Control": "no-store"})
             if len(path) == 3 and path[0] == "agents" and path[2] == "revoke" and request.method == "POST":
                 return JSONResponse(await service.revoke_agent(caller, path[1]))
             if path == ["wikis"]:
@@ -133,6 +184,13 @@ def create_app(settings=None, service=None, verifier=None):
                 if request.method == "POST":
                     data = await body(request)
                     return JSONResponse(await service.create(caller, data["slug"], data["title"]), status_code=201)
+            if path == ["search"] and request.method == "GET":
+                return JSONResponse(await service.search(
+                    caller, None, request.query_params["q"], int(request.query_params.get("limit", "10")),
+                ))
+            if len(path) == 3 and path[0] == "jobs" and path[2] == "undo" and request.method == "POST":
+                return JSONResponse(await service.undo_ingest(caller, path[1]),
+                                    headers={"Cache-Control": "no-store"})
             if len(path) == 2 and path[0] == "jobs" and request.method == "GET":
                 return JSONResponse(await service.job(caller, path[1]))
             if len(path) == 3 and path[0] == "wikis":
@@ -143,6 +201,7 @@ def create_app(settings=None, service=None, verifier=None):
                     if operation == "page":
                         return JSONResponse(await service.read_page(
                             caller, wiki, request.query_params["path"], request.query_params.get("revision"),
+                            line_number(request, "start_line"), line_number(request, "end_line"),
                         ), headers={"Cache-Control": "no-store"})
                     if operation == "jobs":
                         return JSONResponse(await service.jobs(
@@ -168,7 +227,7 @@ def create_app(settings=None, service=None, verifier=None):
                         service.allowed(caller, wiki)
                         async with service.lock(wiki):
                             row = service.allowed(caller, wiki)
-                            file = await asyncio.to_thread(service.git.original, row, request.query_params["path"],
+                            file = await service._thread(service.git.original, row, request.query_params["path"],
                                                            request.query_params.get("revision"))
                             service.allowed(caller, wiki)
                         headers = {"Cache-Control": "no-store"}
@@ -179,12 +238,16 @@ def create_app(settings=None, service=None, verifier=None):
                                             headers=headers)
                 if request.method == "POST":
                     data = await body(request)
+                    if operation == "extract":
+                        return JSONResponse(await service.extract_preview(
+                            caller, wiki, data["filename"], data["content_base64"],
+                        ), headers={"Cache-Control": "no-store"})
                     if operation in ("ingest", "submissions"):
                         if operation == "submissions" and not isinstance(data.get("submission_id"), str):
                             raise ContentError("A retained submission_id is required for this endpoint.")
                         return JSONResponse(await service.ingest(
                             caller, wiki, data["filename"], data["content_base64"], data.get("instructions", ""),
-                            data.get("submission_id"),
+                            data.get("submission_id"), data.get("attachments"),
                         ), status_code=202)
                     if operation == "archive":
                         if type(data.get("archived")) is not bool:
@@ -215,12 +278,16 @@ def create_app(settings=None, service=None, verifier=None):
             return JSONResponse({"error": str(exc)}, status_code=400)
         except (ValueError, KeyError):
             return JSONResponse({"error": "Invalid request or content path."}, status_code=400)
-        except (GitError, ForgejoError) as exc:
+        except DriveUnavailable as exc:
+            return JSONResponse({"error": str(exc)}, status_code=503, headers={"Retry-After": "30"})
+        except (GitError, ForgejoError, DriveError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=502)
 
+    gateway_routes = [Mount("/gateway", app=gateway_app)] if gateway_app is not None else []
     app = Starlette(
         routes=[Route("/health", health), Route("/api/config", config),
-                Route("/api/{path:path}", api, methods=["GET", "POST"]), Mount("/", app=mcp_app)],
+                Route("/drive/windows", drive_windows),
+                Route("/api/{path:path}", api, methods=["GET", "POST"]), *gateway_routes, Mount("/", app=mcp_app)],
         lifespan=lifespan,
     )
     app.state.service = service

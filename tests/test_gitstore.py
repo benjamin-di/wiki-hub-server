@@ -353,3 +353,9 @@ def test_failed_original_transfer_keeps_verified_file_and_removes_temporary_byte
         store.original(wiki, "raw/source.bin")
     assert verified.read_bytes() == original
     assert list(verified.parent.iterdir()) == [verified]
+
+
+def test_git_commands_bound_packing_memory(empty_store):
+    store, _wiki, remote = empty_store
+    assert store.run(remote, "config", "--get", "pack.threads").strip() == b"2"
+    assert store.run(remote, "config", "--get", "core.bigFileThreshold").strip() == b"16m"

@@ -48,6 +48,14 @@ class State:
                 CREATE TABLE IF NOT EXISTS user_status (
                     subject TEXT PRIMARY KEY, suspended INTEGER NOT NULL,
                     pending INTEGER NOT NULL, updated TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS drive_people (
+                    subject TEXT PRIMARY KEY, number INTEGER NOT NULL UNIQUE, created TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS drive_devices (
+                    id TEXT PRIMARY KEY, subject TEXT NOT NULL REFERENCES drive_people(subject),
+                    name TEXT NOT NULL, number INTEGER NOT NULL UNIQUE, created TEXT NOT NULL,
+                    revoked INTEGER NOT NULL DEFAULT 0, confirmed INTEGER NOT NULL DEFAULT 0,
+                    last_seen TEXT);
+                CREATE TABLE IF NOT EXISTS drive_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
             """)
             schema = db.execute("SELECT sql FROM sqlite_master WHERE name='grants'").fetchone()[0]
             if "'admin'" not in schema:
@@ -123,6 +131,88 @@ class State:
     def user_projected(self, subject):
         with self.connect() as db:
             db.execute("UPDATE user_status SET pending=0 WHERE subject=?", (subject,))
+
+    def drive_generation(self, bump=False):
+        with self.connect() as db:
+            if bump:
+                db.execute("INSERT INTO drive_meta VALUES('generation',1) "
+                           "ON CONFLICT(key) DO UPDATE SET value=value+1")
+            row = db.execute("SELECT value FROM drive_meta WHERE key='generation'").fetchone()
+        return row["value"] if row else 0
+
+    def inbox_person(self, subject):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT number FROM drive_people WHERE subject=?", (subject,)).fetchone()
+            if row:
+                return row["number"]
+            number = db.execute("SELECT COALESCE(MAX(number),0)+1 FROM drive_people").fetchone()[0]
+            db.execute("INSERT INTO drive_people VALUES(?,?,?)", (subject, number, now()))
+            return number
+
+    def add_drive_device(self, identifier, subject, name):
+        # Numbers are never reused, so a revoked device's file-server identity
+        # cannot be inherited by a later device or person.
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM drive_people WHERE subject=?", (subject,)).fetchone() is None:
+                number = db.execute("SELECT COALESCE(MAX(number),0)+1 FROM drive_people").fetchone()[0]
+                db.execute("INSERT INTO drive_people VALUES(?,?,?)", (subject, number, now()))
+            number = db.execute("SELECT COALESCE(MAX(number),0)+1 FROM drive_devices").fetchone()[0]
+            db.execute("INSERT INTO drive_devices(id,subject,name,number,created) VALUES(?,?,?,?,?)",
+                       (identifier, subject, name, number, now()))
+            db.execute("INSERT INTO drive_meta VALUES('generation',1) ON CONFLICT(key) DO UPDATE SET value=value+1")
+        return self.drive_device(identifier)
+
+    def drive_device(self, identifier):
+        with self.connect() as db:
+            row = db.execute("""SELECT d.*, p.number AS person FROM drive_devices d
+                JOIN drive_people p ON p.subject=d.subject WHERE d.id=?""", (identifier,)).fetchone()
+        return dict(row) if row else None
+
+    def drive_devices(self, subject=None, include_revoked=True):
+        query = "SELECT d.*, p.number AS person FROM drive_devices d JOIN drive_people p ON p.subject=d.subject"
+        clauses, values = [], []
+        if subject is not None:
+            clauses.append("d.subject=?")
+            values.append(subject)
+        if not include_revoked:
+            clauses.append("d.revoked=0")
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(query + " ORDER BY d.number", values)]
+
+    def drive_people(self):
+        """People with at least one unrevoked device; only they need file-server access."""
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("""SELECT subject, number FROM drive_people WHERE subject IN
+                (SELECT subject FROM drive_devices WHERE revoked=0) ORDER BY number""")]
+
+    def revoke_drive_device(self, identifier):
+        with self.connect() as db:
+            changed = db.execute("UPDATE drive_devices SET revoked=1 WHERE id=? AND revoked=0",
+                                 (identifier,)).rowcount
+            if changed:
+                db.execute("UPDATE drive_meta SET value=value+1 WHERE key='generation'")
+            return changed > 0
+
+    def revoke_unconfirmed_drive_devices(self):
+        """Devices whose enrolment never completed (for example after a restart)."""
+        with self.connect() as db:
+            rows = [row["number"] for row in db.execute(
+                "SELECT number FROM drive_devices WHERE revoked=0 AND confirmed=0")]
+            if rows:
+                db.execute("UPDATE drive_devices SET revoked=1 WHERE revoked=0 AND confirmed=0")
+                db.execute("UPDATE drive_meta SET value=value+1 WHERE key='generation'")
+        return rows
+
+    def drive_observed(self, number, *, confirmed=None, seen=False):
+        with self.connect() as db:
+            if confirmed is not None:
+                db.execute("UPDATE drive_devices SET confirmed=? WHERE number=?", (int(confirmed), number))
+            if seen:
+                db.execute("UPDATE drive_devices SET last_seen=? WHERE number=?", (now(), number))
 
     def recover(self):
         with self.connect() as db:
@@ -303,6 +393,12 @@ class State:
         with self.connect() as db:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         return dict(row) if row else None
+
+    def drive_jobs(self, wiki, subject):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM jobs WHERE wiki=? AND subject=? AND kind='drive-edit' "
+                "ORDER BY created DESC,id DESC LIMIT 10", (wiki, subject))]
 
     def update_job(self, job_id, status, revision=None, error=None, candidate_revision=None):
         with self.connect() as db:

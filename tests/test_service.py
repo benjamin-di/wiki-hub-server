@@ -57,13 +57,15 @@ async def test_accepted_wiki_stays_readable_during_model_ingestion(service):
     service.runner = blocked_model
     job = await service.ingest("owner", "starter", "note.txt", encoded("The workshop opens at 09:30."))
     try:
-        await asyncio.wait_for(entered.wait(), timeout=5)
+        # These bounds detect deadlock, not a latency target. Git subprocesses
+        # and index creation need scheduling time on contended test runners.
+        await asyncio.wait_for(entered.wait(), timeout=30)
         accepted = await asyncio.wait_for(
             service.read_page("owner", "starter", "wiki/index.md"),
-            timeout=2,
+            timeout=30,
         )
         assert accepted == before
-        search = await asyncio.wait_for(service.search("owner", "starter", "Unpublished"), timeout=2)
+        search = await asyncio.wait_for(service.search("owner", "starter", "Unpublished"), timeout=30)
         assert search["results"] == []
     finally:
         release.set()
@@ -278,7 +280,7 @@ async def test_shutdown_during_cleanup_does_not_downgrade_completed_job(service,
     def delayed_cleanup(*args):
         entered.set()
         try:
-            if not release.wait(timeout=10):
+            if not release.wait(timeout=30):
                 raise RuntimeError("Test did not release cleanup")
             cleanup(*args)
         finally:
@@ -287,12 +289,14 @@ async def test_shutdown_during_cleanup_does_not_downgrade_completed_job(service,
     monkeypatch.setattr(service.git, "cleanup", delayed_cleanup)
     job = await service.ingest("owner", "starter", "note.txt", encoded("Source"))
     try:
-        assert await asyncio.to_thread(entered.wait, 5)
+        # Reaching cleanup includes a complete Git/LFS publication. This is a
+        # synchronization barrier, not a five-second performance requirement.
+        assert await asyncio.to_thread(entered.wait, 30)
         await service.shutdown()
         assert (await service.job("owner", job["id"]))["status"] == "completed"
     finally:
         release.set()
-        assert await asyncio.to_thread(cleaned.wait, 5)
+        assert await asyncio.to_thread(cleaned.wait, 30)
 
 
 async def test_accepted_publish_is_completed_when_canonical_refresh_needs_retry(service, monkeypatch):

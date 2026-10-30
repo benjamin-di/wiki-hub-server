@@ -3,7 +3,7 @@ FROM ghcr.io/astral-sh/uv:0.9.26@sha256:9a23023be68b2ed09750ae636228e903a54a05ea
 FROM python:3.12.14-slim-trixie@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git git-lfs poppler-utils ca-certificates \
+    && apt-get install -y --no-install-recommends git git-lfs poppler-utils ocrmypdf tesseract-ocr-eng ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 1001 wiki && useradd -u 1001 -g 1001 -M wiki \
     && mkdir /data /workspaces && chown 1001:1001 /data /workspaces

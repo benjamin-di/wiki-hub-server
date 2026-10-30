@@ -25,7 +25,11 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from . import __version__
 from .copy_lock import CopyBusyError, FileLockTimeoutError, copy_lock, file_lock
+from .drive_client import DriveClientError
+
+API_PATH = re.compile(r"/api(?:/[A-Za-z0-9][A-Za-z0-9_.:-]*)+")
 
 WINDOWS = os.name == "nt"
 
@@ -242,7 +246,19 @@ class APIClient:
     @staticmethod
     def _check(response: httpx.Response) -> None:
         if not response.is_success:
-            raise CLIError(f"Request failed (HTTP {response.status_code}).")
+            # The server's own error text explains denials and suggests corrections; never echo other bodies.
+            try:
+                try:
+                    content = response.content
+                except httpx.ResponseNotRead:
+                    # Downloads leave the response unread. Inspect only a small
+                    # error body; an HTML error page must not consume unlimited RAM.
+                    content = next(response.iter_bytes(chunk_size=8193), b"")
+                detail = json.loads(content).get("error") if content and len(content) <= 8192 else None
+            except (ValueError, AttributeError):
+                detail = None
+            suffix = f": {detail}" if isinstance(detail, str) and len(detail) <= 1000 else "."
+            raise CLIError(f"Request failed (HTTP {response.status_code}){suffix}")
 
     def _refresh(self, token: dict[str, Any]) -> dict[str, Any]:
         if not token.get("refresh_token"):
@@ -279,6 +295,10 @@ class APIClient:
             return token
 
     def _response(self, method: str, path: str, *, stream: bool = False, **kwargs: Any) -> httpx.Response:
+        # Names reach the path from arguments, including model-driven MCP tool calls; refuse any
+        # that could become another endpoint through "..", "?", "#" or "/".
+        if not API_PATH.fullmatch(path):
+            raise CLIError("Choose a valid wiki, job or item name.")
         key = agent_key(self.server, self.agent_id) if self.agent_id else oauth_key(self.server)
         token = self._token(key)
         def send():
@@ -294,7 +314,7 @@ class APIClient:
             response = send()
         try:
             self._check(response)
-        except CLIError:
+        except BaseException:
             response.close()
             raise
         return response
@@ -430,17 +450,35 @@ class HTTPService:
     async def pages(self, subject: str, wiki: str):
         return self.client.request("GET", f"/api/wikis/{wiki}/pages")
 
-    async def read_page(self, subject: str, wiki: str, path: str, revision: str | None = None):
+    async def read_page(self, subject: str, wiki: str, path: str, revision: str | None = None,
+                        start_line: int | None = None, end_line: int | None = None):
         params = {"path": path}
         if revision is not None:
             params["revision"] = revision
+        for name, value in (("start_line", start_line), ("end_line", end_line)):
+            if value is not None:
+                params[name] = str(value)
         result = self.client.request("GET", f"/api/wikis/{wiki}/page", params=params)
         if revision is not None and (not isinstance(result, dict) or result.get("revision") != revision):
             raise CLIError("The server did not confirm the requested revision. No pinned read was returned.")
+        if (start_line is not None or end_line is not None) and (
+                not isinstance(result, dict) or "total_lines" not in result):
+            raise CLIError("This server does not support line-range reads. Upgrade it or read the whole page.")
         return result
 
-    async def search(self, subject: str, wiki: str, query: str, limit: int = 10):
-        return self.client.request("GET", f"/api/wikis/{wiki}/search", params={"q": query, "limit": limit})
+    async def search(self, subject: str, wiki: str | None, query: str, limit: int = 10):
+        if wiki is not None:
+            return self.client.request("GET", f"/api/wikis/{wiki}/search", params={"q": query, "limit": limit})
+        try:
+            return self.client.request("GET", "/api/search", params={"q": query, "limit": limit})
+        except CLIError as exc:
+            if "HTTP 404" in str(exc):
+                raise CLIError("This server cannot search all wikis at once. Name a wiki or upgrade it.") from None
+            raise
+
+    async def extract_preview(self, subject: str, wiki: str, filename: str, content_base64: str):
+        return self.client.request("POST", f"/api/wikis/{wiki}/extract",
+                                   json={"filename": filename, "content_base64": content_base64})
 
     async def ingest(self, subject: str, wiki: str, filename: str, content_base64: str, instructions: str = "",
                      submission_id: str | None = None):
@@ -692,9 +730,28 @@ def discover_copies(root: Path, client: APIClient) -> list[dict[str, Any]]:
     return results
 
 
+def offer_drive(client: APIClient, store: CredentialStore, ask=input) -> None:
+    """After a Windows sign-in, offer the drive once when the server provides one."""
+    from . import drive_client
+
+    if not (WINDOWS and sys.stdin.isatty()):
+        return
+    try:
+        status = client.request("GET", "/api/drive")
+        with store.locked():
+            known = client.server in store._read().get("drives", {})
+        if known or not status.get("enabled"):
+            return
+        if ask("Add the Wiki drive to Explorer? [Y/n] ").strip().lower() in ("", "y", "yes"):
+            drive_client.connect(client, store)
+    except (CLIError, httpx.HTTPError, OSError, DriveClientError) as exc:
+        print(f"wiki: the Wiki drive was not added ({exc}). Run wiki drive connect to retry.", file=sys.stderr)
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(prog="wiki", description="Use your wiki-hub wikis.")
     result.add_argument("--server", help="wiki-hub URL (or WIKI_SERVER_URL)")
+    result.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = result.add_subparsers(dest="command", required=True)
     login = sub.add_parser("login", help="Sign in with your passkey")
     login.add_argument("--no-browser", action="store_true")
@@ -725,6 +782,7 @@ def parser() -> argparse.ArgumentParser:
     add_agent.add_argument("name")
     add_agent.add_argument("--directory", type=Path, help="New private configuration directory for this agent")
     add_agent.add_argument("--workload-client", help="Bind an existing Pocket ID workload; issues no local key")
+    add_agent.add_argument("--owner", help="Owner identity subject for a workload agent")
     agents.add_parser("list")
     revoke_agent = agents.add_parser("revoke")
     revoke_agent.add_argument("id")
@@ -782,10 +840,27 @@ def parser() -> argparse.ArgumentParser:
     rollback.add_argument("wiki")
     rollback.add_argument("revision")
     sub.add_parser("mcp", help="Run the wiki tools over local MCP stdio")
+    drive = sub.add_parser("drive", help="Use the Wiki network drive")
+    drives = drive.add_subparsers(dest="drive_command", required=True)
+    connect = drives.add_parser("connect", help="Add the Wiki drive to this computer")
+    connect.add_argument("--letter", help="Drive letter on Windows (default: W: or the next free letter)")
+    connect.add_argument("--name", help="Device name shown to you and the owner")
+    connect.add_argument("--label", default="Wiki", help="Explorer label on Windows")
+    drive_status = drives.add_parser("status", help="Show the drive, its wikis and your devices")
+    drive_status.add_argument("--all", action="store_true", help="Include revoked devices")
+    drives.add_parser("disconnect", help="Remove the drive and revoke this computer's credential")
+    devices = drives.add_parser("devices", help="List drive devices")
+    devices.add_argument("--subject", help="Another person's subject (configured owner only)")
+    revoke_device = drives.add_parser("revoke", help="Revoke a drive device")
+    revoke_device.add_argument("id")
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        # Windows pipes default to the ANSI code page, which cannot encode many wiki names and pages.
+        if hasattr(stream, "reconfigure") and (stream.encoding or "").lower().replace("-", "") != "utf8":
+            stream.reconfigure(encoding="utf-8")
     args = parser().parse_args(argv)
     try:
         store = CredentialStore()
@@ -831,7 +906,26 @@ def main(argv: list[str] | None = None) -> int:
         client = APIClient(server, store)
         if args.command == "login":
             client.login(open_browser=not args.no_browser)
+            offer_drive(client, store)
             return 0
+        if args.command == "drive":
+            from . import drive_client
+
+            if args.drive_command == "connect":
+                drive_client.connect(client, store, letter=args.letter, name=args.name, label=args.label)
+                return 0
+            if args.drive_command == "disconnect":
+                result = drive_client.disconnect(client, store)
+                return 1 if result.get("pending") else 0
+            if args.drive_command == "status":
+                value = drive_client.status(client, store, revoked=args.all)
+            elif args.drive_command == "devices":
+                value = client.request("GET", "/api/drive/devices",
+                                       params={"subject": args.subject} if args.subject else None)
+            else:
+                value = client.request("POST", f"/api/drive/devices/{args.id}/revoke")
+            print(json.dumps(value, indent=2, ensure_ascii=False))
+            return 1 if args.drive_command == "revoke" and value.get("pending") else 0
         if args.command == "clone":
             clone(client, args.wiki, args.directory, read_only=args.read_only)
             return 0
@@ -841,7 +935,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "mcp":
             from .mcp import create_mcp
 
-            create_mcp(HTTPService(client), subject_provider=lambda: "cli").run(transport="stdio")
+            create_mcp(HTTPService(client), subject_provider=lambda: "cli", errors=(CLIError,)).run(transport="stdio")
             return 0
         if args.command == "create":
             value = client.request("POST", "/api/wikis", json={"slug": args.slug, "title": args.title or args.slug})
@@ -851,9 +945,12 @@ def main(argv: list[str] | None = None) -> int:
                     if args.directory:
                         raise CLIError("A workload keeps its existing identity configuration; omit --directory.")
                     value = client.request("POST", "/api/agents/workloads",
-                                           json={"name": args.name, "client_id": args.workload_client})
+                                           json={"name": args.name, "client_id": args.workload_client,
+                                                 **({"owner": args.owner} if args.owner else {})})
                     print(json.dumps(value, indent=2))
                     return 0
+                if args.owner:
+                    raise CLIError("--owner requires --workload-client.")
                 directory = args.directory.expanduser().absolute() if args.directory else None
                 if directory and directory.exists():
                     raise CLIError("Choose a new private configuration directory for the agent.")
@@ -919,6 +1016,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.revision is not None:
                 params["revision"] = args.revision
             value = client.request("GET", f"/api/wikis/{args.wiki}/page", params=params)
+            if args.revision is not None and (not isinstance(value, dict) or value.get("revision") != args.revision):
+                raise CLIError("The server did not confirm the requested revision. No pinned read was returned.")
             if isinstance(value, dict) and "content" in value:
                 print(value["content"])
                 return 0
@@ -928,7 +1027,7 @@ def main(argv: list[str] | None = None) -> int:
             value = client.request("POST", f"/api/wikis/{args.wiki}/rollback", json={"revision": args.revision})
         print(json.dumps(value, indent=2, ensure_ascii=False))
         return 0
-    except (CLIError, httpx.HTTPError, OSError, ValueError, KeyError) as exc:
+    except (CLIError, httpx.HTTPError, OSError, ValueError, KeyError, DriveClientError) as exc:
         # HTTP exceptions can include a URL. Credentials never enter our URLs.
         print(f"wiki: {exc}", file=sys.stderr)
         return 1

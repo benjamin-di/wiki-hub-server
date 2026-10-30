@@ -9,6 +9,12 @@ live in the application database; ordinary readers receive no additional wiki
 access. Agent credentials are separate, revocable and explicitly scoped. The
 application's privileged Forgejo credential stays on the server.
 
+The optional `/gateway/mcp` transport instead requires a dedicated backend
+credential and a gateway-asserted immutable human subject. Enabling it trusts
+that gateway to authenticate humans and overwrite identity headers. It shares
+the normal per-wiki authorization checks and accepts no machine subjects.
+Its credential cannot authorize the REST API or direct OAuth MCP transport.
+
 Keep the model worker on a private application network. The bundled HTTP-model
 worker accepts bounded text edits and executes no model tools or commands. It
 has no Git or identity credential. External workers must enforce the equivalent

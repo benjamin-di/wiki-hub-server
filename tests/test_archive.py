@@ -5,6 +5,7 @@ import base64
 import json
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pytest
@@ -172,29 +173,37 @@ async def test_quick_reopen_never_revives_running_or_queued_jobs(service, outcom
 
 
 async def test_archive_waits_for_publication_but_not_for_model(service, monkeypatch):
+    loop = asyncio.get_running_loop()
+    # A single executor worker makes a blocking checkpoint wait starve the ingest.
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
     await service.create("owner", "handbook", "Handbook")
-    entered, release = threading.Event(), threading.Event()
+    entered, release = asyncio.Event(), threading.Event()
     publish = service.git.publish
 
     def held(*a):
-        entered.set()
-        assert release.wait(10)
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(30)
         return publish(*a)
 
     monkeypatch.setattr(service.git, "publish", held)
     job = await service.ingest("owner", "handbook", "note.txt", "bm90ZQ==")
     archive = None
     try:
-        assert await asyncio.to_thread(entered.wait, 5)
+        # Waiting in the executor can occupy the worker the ingest itself
+        # needs. Signal the event loop directly; keep a bounded deadlock guard.
+        await asyncio.wait_for(entered.wait(), 30)
         archive = asyncio.create_task(service.archive("owner", "handbook", True))
         await asyncio.sleep(0)
         assert not archive.done()
+        assert service.state.wiki("handbook")["status"] == "ready"
+        assert service.state.job(job["id"])["status"] == "running"
     finally:
         release.set()
         await asyncio.gather(*service.tasks)
         if archive:
             await archive
     assert (await service.job("owner", job["id"]))["status"] == "completed"
+    assert service.state.wiki("handbook")["status"] == "archived"
 
 
 async def test_cancelled_backend_archive_cannot_overtake_reopen(service, monkeypatch):

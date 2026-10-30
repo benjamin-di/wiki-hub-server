@@ -150,3 +150,59 @@ def test_enrollment_is_one_hour_private_and_rejects_the_short_provider_code(tmp_
     with pytest.raises(setup.SetupError, match="twelve-character"):
         setup.enroll(invalid, "synthetic-owner", "https://id.example.test", target)
     assert target.read_text() == "https://id.example.test/lc/AAAAAAAAAAAA\n"
+
+
+def test_web_identity_setup_uses_confidential_pkce_launch_tile_and_preserves_secret():
+    setup = example("configure-identity")
+    clients, writes, secret_creations = {}, [], []
+
+    def handle(request):
+        path = request.url.path
+        if request.method == "GET":
+            if path == "/api/users":
+                return httpx.Response(200, json=[{"id": "owner", "username": "operator", "isAdmin": True}])
+            if path == "/api/signup/setup":
+                return httpx.Response(404, json={"code": "setup_not_available"})
+            if path == "/api/apis":
+                return httpx.Response(200, json=[{"id": "api", "resource": "https://wiki.example.test/mcp"}])
+            if path == "/api/apis/api":
+                return httpx.Response(200, json={"permissions": [{"id": "permission", "key": "wiki:access"}]})
+            if path == "/api/oidc/clients":
+                return httpx.Response(200, json=list(clients.values()))
+        writes.append((request.method, path))
+        if path.endswith("/logo"):
+            assert request.url.params["light"] == "true" and b"<svg" in request.content
+            clients["wiki-web"]["hasLogo"] = True
+            return httpx.Response(204)
+        if request.method == "DELETE":
+            assert path == "/api/oidc/clients/wiki-web/secrets/initial-secret"
+            return httpx.Response(204)
+        payload = json.loads(request.content)
+        if path.endswith("/secrets"):
+            assert payload == {"secret": "synthetic-configured-web-secret-minimum-32"}
+            secret_creations.append(path)
+            return httpx.Response(201, json={"id": "configured-secret"})
+        if path == "/api/oidc/clients":
+            clients[payload["id"]] = payload
+            if payload["id"] == "wiki-web":
+                assert payload["isPublic"] is False and payload["pkceEnabled"] is True
+                assert payload["callbackURLs"] == ["https://wiki.example.test/auth/callback"]
+                assert payload["launchURL"] == "https://wiki.example.test/"
+                assert payload["backchannelLogoutURL"] == "https://wiki.example.test/auth/backchannel-logout"
+                return httpx.Response(201, json={"createdSecret": {"id": "initial-secret", "value": "withheld"}})
+        else:
+            assert payload["clientAccess"] is False and payload["clientPermissionIds"] == []
+        return httpx.Response(200, json={})
+
+    client = httpx.Client(base_url="https://id.example.test", transport=httpx.MockTransport(handle))
+    result = setup.configure(client, "https://wiki.example.test", "operator",
+                             web_client_secret="synthetic-configured-web-secret-minimum-32")
+    assert result["web_client_id"] == "wiki-web" and len(clients) == 4
+    assert "synthetic-configured" not in json.dumps(result)
+    setup.configure(client, "https://wiki.example.test", "operator",
+                    web_client_secret="synthetic-configured-web-secret-minimum-32")
+    assert len(secret_creations) == 1
+    clients["wiki-web"]["launchURL"] = "https://other.example.test/"
+    with pytest.raises(setup.SetupError, match="configuration differs"):
+        setup.configure(client, "https://wiki.example.test", "operator",
+                        web_client_secret="synthetic-configured-web-secret-minimum-32")

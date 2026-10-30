@@ -31,6 +31,8 @@ log = logging.getLogger(__name__)
 ROLES = {"read": 0, "contribute": 1, "write": 2, "admin": 3}
 ARCHIVE_STATES = {"archiving", "archived", "reopening"}
 MAX_DRIVE_DEVICES = 10
+# Originals add a 32-character job ID and dash to a filesystem component.
+MAX_SOURCE_NAME_BYTES = 255 - 33
 SEARCH_LOCK_WAIT = 10
 OVERVIEW_BUDGET = 2.0
 DISCOVERY_BUDGET = 10.0
@@ -67,6 +69,12 @@ def source_name(filename):
         or any(ord(c) < 32 for c in filename)
     ):
         raise ContentError("Use a plain source filename without folders or platform-specific characters.")
+    try:
+        size = len(filename.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ContentError("Use a source filename containing valid Unicode characters.") from None
+    if size > MAX_SOURCE_NAME_BYTES:
+        raise ContentError(f"Source filenames must fit within {MAX_SOURCE_NAME_BYTES} UTF-8 bytes.")
     return filename
 
 
@@ -247,6 +255,7 @@ class Service:
 
     def _access_result(self, wiki):
         return {"wiki": wiki["slug"], "owner": wiki["owner"], "grants": self.state.grants(wiki["slug"]),
+                "version": self.state.access_version(wiki["slug"]),
                 **self.state.copy_setting("wiki", wiki["slug"])}
 
     async def _project_copies(self, wiki, recipient, role):
@@ -333,7 +342,7 @@ class Service:
             await self._drive_access_changed([wiki["slug"] for wiki in self.state.all_wikis()])
             return {"subject": recipient, **self.state.user_status(recipient)}
 
-    async def share(self, subject, slug, recipient, role):
+    async def share(self, subject, slug, recipient, role, *, operation_id=None, expected_version=None, retry=False):
         self.allowed(subject, slug, "admin")
         if role not in ("read", "contribute", "write", "admin", "none"):
             raise ContentError("Choose read, contribute, write or admin.")
@@ -342,6 +351,14 @@ class Service:
             raise ContentError("Use the exact subject from the recipient's wiki whoami command.")
         if recipient.startswith("client-") and role != "none":
             raise ContentError("Share with the registered agent ID, not its signed workload subject.")
+        if operation_id is not None and (not isinstance(operation_id, str)
+                                        or not re.fullmatch(r"[A-Za-z0-9_-]{16,100}", operation_id)):
+            raise ContentError("Use a valid retained operation identifier.")
+        if expected_version is not None and (type(expected_version) is not int or expected_version < 0):
+            raise ContentError("The access version must be a non-negative integer.")
+        if type(retry) is not bool:
+            raise ContentError("retry must be true or false.")
+        operation_id = operation_id or uuid.uuid4().hex
         async with self.copy_lock, self.access_lock(slug):
             wiki = self.allowed(subject, slug, "admin")
             if recipient == wiki["owner"]:
@@ -360,15 +377,19 @@ class Service:
                                   else self.state.role(agent["owner"], slug))
                     if ROLES[owner_role] < ROLES[role]:
                         raise Denied("The agent's owner does not have this role on the wiki.")
-                self.state.set_grant(slug, recipient, role)
-                self.state.projected(slug, recipient)
-                return self._access_result(wiki)
+                operation, apply = self.state.begin_share(
+                    slug, subject, recipient, role, operation_id, expected_version, retry)
+                if apply:
+                    self.state.complete_share(slug, recipient, operation_id)
+                return {**self._access_result(wiki), "operation": self.state.access_operation(operation["id"])}
             # Pending projection denies API access and new credentials, including after a restart.
-            self.state.set_grant(slug, recipient, role)
-            await self._project_copies(wiki, recipient, role)
-            self.state.projected(slug, recipient)
-            await self._drive_access_changed([slug])
-            return self._access_result(wiki)
+            operation, apply = self.state.begin_share(
+                slug, subject, recipient, role, operation_id, expected_version, retry)
+            if apply:
+                await self._project_copies(wiki, recipient, role)
+                self.state.complete_share(slug, recipient, operation_id)
+                await self._drive_access_changed([slug])
+            return {**self._access_result(wiki), "operation": self.state.access_operation(operation["id"])}
 
     async def list_wikis(self, subject, include_archived=False):
         self.require_active(subject)
@@ -1400,7 +1421,7 @@ class Service:
         deadline = time.monotonic() + self.settings.drive_confirm_seconds
         while True:
             observed = self.drive.observed()
-            if observed and observed["generation"] >= generation and check(observed):
+            if observed and observed["age"] <= 60 and observed["generation"] >= generation and check(observed):
                 return observed
             if time.monotonic() >= deadline:
                 raise DriveUnavailable("The file server has not confirmed this drive change. Repeat it to finish.")

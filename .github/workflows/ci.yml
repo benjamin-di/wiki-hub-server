@@ -24,6 +24,23 @@ jobs:
       - run: uv python install '${{ matrix.python }}'
       - run: git lfs version
       - run: make check
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+      - run: uv sync --locked --python 3.12
+      - run: git lfs version
+      - run: uv run --locked playwright install --with-deps chromium
+      - run: make check-browser
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wiki-hub-browser-checks
+          path: .artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
   windows-credentials:
     runs-on: windows-latest
     timeout-minutes: 10

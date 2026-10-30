@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Agents · Wiki Hub{% endblock %}
+{% block content %}<h1>Your agents</h1><p class="muted">Agents need explicit wiki grants and cannot exceed their owner's current access.</p><div id="message" class="status" role="status"></div>
+{% for agent in agents %}<section class="panel"><h2>{{ agent.name }}</h2><p><code>{{ agent.id }}</code></p><p>{{ 'Revoked' if agent.revoked else 'Active · no access without a wiki grant' }}</p>
+{% if not agent.revoked %}<form class="manage-form" data-endpoint="/ui/api/agents/{{ agent.id }}/revoke" data-confirm="Revoke this agent? Its current API and MCP access will stop."><button class="button danger" type="submit">Revoke {{ agent.name }}</button></form>{% endif %}</section>{% else %}<p>No agents registered to your account.</p>{% endfor %}
+{% if instance_owner %}<section class="panel"><h2>Register an agent</h2><p>Use a registered workload client where available. A local agent key is shown once. Registration grants no wiki access.</p>
+<form class="manage-form" data-endpoint="/ui/api/agents"><label for="agent-name">Agent name</label><input id="agent-name" name="name" maxlength="120" required>
+<label for="agent-client">Pocket ID workload client ID (optional)</label><input id="agent-client" name="client_id" maxlength="160" autocomplete="off"><p class="help">Leave empty for a local agent key. This does not create an identity-provider registration.</p><button class="button primary" type="submit">Register agent</button></form></section>{% endif %}
+<p class="help">Open a wiki's Share page to add one of your active agents as a Viewer or Contributor.</p>{% endblock %}

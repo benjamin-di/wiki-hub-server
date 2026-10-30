@@ -12,6 +12,10 @@ def now():
     return datetime.now(UTC).isoformat()
 
 
+class AccessConflict(ValueError):
+    """The access snapshot or operation no longer matches current intent."""
+
+
 class State:
     def __init__(self, directory: Path):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -56,6 +60,13 @@ class State:
                     revoked INTEGER NOT NULL DEFAULT 0, confirmed INTEGER NOT NULL DEFAULT 0,
                     last_seen TEXT);
                 CREATE TABLE IF NOT EXISTS drive_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS access_versions (
+                    wiki TEXT PRIMARY KEY REFERENCES wikis(slug), version INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS access_operations (
+                    id TEXT PRIMARY KEY, wiki TEXT NOT NULL REFERENCES wikis(slug),
+                    actor TEXT NOT NULL, subject TEXT NOT NULL, before_role TEXT,
+                    role TEXT NOT NULL, status TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS access_activity ON access_operations(wiki,created);
             """)
             schema = db.execute("SELECT sql FROM sqlite_master WHERE name='grants'").fetchone()[0]
             if "'admin'" not in schema:
@@ -262,6 +273,64 @@ class State:
     def projected(self, slug, subject):
         with self.connect() as db:
             db.execute("UPDATE grants SET pending=0 WHERE wiki=? AND subject=?", (slug, subject))
+
+    def access_version(self, slug):
+        with self.connect() as db:
+            row = db.execute("SELECT version FROM access_versions WHERE wiki=?", (slug,)).fetchone()
+        return row["version"] if row else 0
+
+    def access_operation(self, identifier):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM access_operations WHERE id=?", (identifier,)).fetchone()
+        return dict(row) if row else None
+
+    def access_activity(self, slug, limit=50):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM access_operations WHERE wiki=? ORDER BY created DESC,id DESC LIMIT ?", (slug, limit))]
+
+    def begin_share(self, slug, actor, subject, role, identifier, expected=None, retry=False):
+        """Journal intent and its fail-closed grant atomically, including legacy API writes."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute("SELECT * FROM access_operations WHERE id=?", (identifier,)).fetchone()
+            if existing:
+                if any(existing[k] != v for k, v in
+                       (("wiki", slug), ("subject", subject), ("role", role))):
+                    raise AccessConflict("This operation identifier belongs to another change.")
+                if not retry:
+                    return dict(existing), False
+                if existing["status"] == "completed":
+                    return dict(existing), False
+                if existing["status"] != "pending":
+                    raise AccessConflict("A newer change replaced this operation. Reload access before editing.")
+            elif retry:
+                raise AccessConflict("This operation does not exist. Reload access before editing.")
+            version = db.execute("SELECT version FROM access_versions WHERE wiki=?", (slug,)).fetchone()
+            if expected is not None and expected != (version["version"] if version else 0):
+                raise AccessConflict(
+                    "Access changed since this page was loaded. Review the current access and try again.")
+            if existing:
+                return dict(existing), True
+            previous = db.execute("SELECT role FROM grants WHERE wiki=? AND subject=?", (slug, subject)).fetchone()
+            stamp = now()
+            db.execute("UPDATE access_operations SET status='superseded',updated=? "
+                       "WHERE wiki=? AND subject=? AND status='pending'", (stamp, slug, subject))
+            db.execute("INSERT INTO access_operations VALUES(?,?,?,?,?,?,?,?,?)",
+                       (identifier, slug, actor, subject, previous["role"] if previous else None,
+                        role, "pending", stamp, stamp))
+            db.execute("INSERT INTO grants(wiki,subject,role,pending,updated) VALUES(?,?,?,1,?) "
+                       "ON CONFLICT(wiki,subject) DO UPDATE SET role=excluded.role,pending=1,updated=excluded.updated",
+                       (slug, subject, role, stamp))
+            db.execute("INSERT INTO access_versions VALUES(?,1) ON CONFLICT(wiki) DO UPDATE SET version=version+1",
+                       (slug,))
+            return dict(db.execute("SELECT * FROM access_operations WHERE id=?", (identifier,)).fetchone()), True
+
+    def complete_share(self, slug, subject, identifier):
+        with self.connect() as db:
+            db.execute("UPDATE grants SET pending=0 WHERE wiki=? AND subject=?", (slug, subject))
+            db.execute("UPDATE access_operations SET status='completed',updated=? WHERE id=?", (now(), identifier))
+            db.execute("UPDATE access_versions SET version=version+1 WHERE wiki=?", (slug,))
 
     def add_agent(self, identifier, owner, name, token):
         with self.connect() as db:

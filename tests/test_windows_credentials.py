@@ -42,6 +42,7 @@ def test_native_device_login_reopen_refresh_and_git_credential(tmp_path, monkeyp
                 return httpx.Response(200, json={"access_token": "new" * 700, "refresh_token": "rotated-test",
                                                 "expires_in": 300})
             return httpx.Response(200, json=token)
+        assert request.url.path == "/api/me"
         assert request.headers["Authorization"] == "Bearer " + "new" * 700
         return httpx.Response(200, json={"ok": True})
 
@@ -58,7 +59,7 @@ def test_native_device_login_reopen_refresh_and_git_credential(tmp_path, monkeyp
         saved["expires_at"] = time.time() - 1
         reopened.put(key, saved)
         client = cli.APIClient(server, reopened, httpx.Client(transport=transport))
-        assert client.request("GET", "/probe") == {"ok": True}
+        assert client.request("GET", "/api/me") == {"ok": True}
         reopened.put(git_key, {"username": "test", "token": "synthetic-git-secret"})
         assert cli.CredentialStore(tmp_path).get(key)["refresh_token"] == "rotated-test"
         assert cli.CredentialStore(tmp_path).get(git_key)["token"] == "synthetic-git-secret"

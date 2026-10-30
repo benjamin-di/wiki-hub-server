@@ -24,6 +24,8 @@ from .forgejo import ForgejoError
 from .gitstore import ContentError, GitError
 from .mcp import create_mcp
 from .service import Busy, Denied, Service
+from .state import AccessConflict
+from .web import BrowserWeb
 
 log = logging.getLogger(__name__)
 
@@ -37,10 +39,11 @@ def line_number(request, name):
     return int(value)
 
 
-def create_app(settings=None, service=None, verifier=None):
+def create_app(settings=None, service=None, verifier=None, *, web_transport=None):
     settings = settings or Settings.from_env()
     service = service or Service(settings)
     verifier = PrincipalVerifier(verifier or create_verifier(settings), service.state)
+    web = BrowserWeb(settings, service, verifier, web_transport)
     metadata_url = settings.public_url + "/.well-known/oauth-protected-resource/mcp"
     challenge = {"WWW-Authenticate": f'Bearer resource_metadata="{metadata_url}", scope="{WIKI_SCOPE}"'}
     # OAuth issuer identifiers are exact strings. Preserve a root issuer's
@@ -276,6 +279,8 @@ def create_app(settings=None, service=None, verifier=None):
             return JSONResponse({"error": str(exc)}, status_code=429, headers={"Retry-After": "30"})
         except ContentError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
+        except AccessConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
         except (ValueError, KeyError):
             return JSONResponse({"error": "Invalid request or content path."}, status_code=400)
         except DriveUnavailable as exc:
@@ -285,13 +290,14 @@ def create_app(settings=None, service=None, verifier=None):
 
     gateway_routes = [Mount("/gateway", app=gateway_app)] if gateway_app is not None else []
     app = Starlette(
-        routes=[Route("/health", health), Route("/api/config", config),
+        routes=[*web.routes(), Route("/health", health), Route("/api/config", config),
                 Route("/drive/windows", drive_windows),
                 Route("/api/{path:path}", api, methods=["GET", "POST"]), *gateway_routes, Mount("/", app=mcp_app)],
         lifespan=lifespan,
     )
     app.state.service = service
     app.state.mcp = mcp
+    app.state.web = web
     return app
 
 

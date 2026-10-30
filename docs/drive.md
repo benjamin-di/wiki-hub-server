@@ -64,8 +64,9 @@ Agents never receive drive access.
 ## Connection troubleshooting
 
 - If `/drive/windows` returns 404, ask the operator to check the running Hub
-  release, the request route and `WIKI_DRIVE_ENABLED`. The helper is served only
-  when the drive is enabled.
+  release, the request route and the three required settings: `WIKI_DRIVE_DIR`,
+  `WIKI_DRIVE_CONTROL_DIR` and `WIKI_DRIVE_SERVER`. The helper is served only
+  when all three are configured.
 - If browser approval works but mapping fails, check the private route to the
   file server and TCP port 445. The Wiki Hub HTTPS address and SMB server address
   can differ. `wiki drive status` reports the configured server and reachability.
@@ -73,6 +74,9 @@ Agents never receive drive access.
   settings. A successful sign-in grants no wiki access by itself.
 - If disconnect reports pending revocation, repeat it after the file server
   recovers. Operators inspect pending permission changes before reporting success.
+- If recovery after view metadata loss cannot read a writer's folder, rebuilding
+  waits until the folder is readable. Restore directory access and retry so the
+  unpublished files can be retained before replacing the view.
 
 Operators should follow the [drive upgrade checks](operations.md#network-drive-upgrade-checks).
 
@@ -102,6 +106,11 @@ the server refuses waits until the page changes (all pages in that commit, unles
 the refusal names the page). Files over the upload limit are only hashed, never
 read whole. Sources still enter a wiki
 only through `wiki contribute` or the API.
+
+If a folder cannot be enumerated, its existing pages are kept and the folder
+appears in `pages_needing_attention`. Independent readable pages can still
+publish. The next scan retries the folder and clears that diagnostic when it
+can be read; an unreadable folder does not establish that its pages were deleted.
 
 ## How edits are published
 

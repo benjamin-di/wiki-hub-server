@@ -129,6 +129,8 @@ def context(settings, data):
     for path in sorted((work / "wiki").rglob("*.md")):
         name = str(path.relative_to(work))
         path = safe_file(work, name)
+        if path.is_dir():
+            continue
         size = path.stat().st_size + len(name.encode())
         if size > remaining:
             omitted.append(name)

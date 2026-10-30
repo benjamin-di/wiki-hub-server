@@ -189,3 +189,22 @@ def test_oversized_source_is_never_silently_truncated_or_sent_to_model(worker):
     with TestClient(create_app(settings, httpx.MockTransport(unexpected))) as client:
         result = client.post("/run", json={"run_id": IDENTIFIER, "vault": IDENTIFIER, "prompt": "File source."})
     assert result.status_code == 400 and "context limit" in result.json()["error"]
+
+
+def test_markdown_named_directory_does_not_block_ingestion(worker):
+    settings, work = worker
+    folder = work / "wiki" / "guides.md"
+    folder.mkdir()
+    (folder / "intro.md").write_text("# Workshop guide\n\nOpens at 09:30.\n")
+
+    def model(request):
+        supplied = json.loads(json.loads(request.content)["messages"][1]["content"])
+        assert "wiki/guides.md" not in supplied["files"]
+        assert "wiki/guides.md/intro.md" in supplied["files"]
+        return httpx.Response(200, json=completion({"edits": [{
+            "path": "wiki/guides.md/intro.md", "content": "# Workshop guide\n\nCloses at 17:00.\n"}]}))
+
+    with TestClient(create_app(settings, httpx.MockTransport(model))) as client:
+        result = client.post("/run", json={"run_id": IDENTIFIER, "vault": IDENTIFIER, "prompt": "File source."})
+    assert result.status_code == 200
+    assert "Closes at 17:00" in (folder / "intro.md").read_text()

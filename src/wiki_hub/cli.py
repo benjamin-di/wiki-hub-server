@@ -787,7 +787,8 @@ def parser() -> argparse.ArgumentParser:
     revoke_agent = agents.add_parser("revoke")
     revoke_agent.add_argument("id")
     for name in ("access", "share", "unshare"):
-        command = sub.add_parser(name)
+        command = sub.add_parser(
+            name, epilog="Manage access on the web: open your Wiki Hub server, then My wikis → Share.")
         command.add_argument("wiki")
         if name != "access":
             command.add_argument("subject", help="Exact subject from the recipient's wiki whoami")

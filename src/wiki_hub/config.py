@@ -17,6 +17,13 @@ class Settings:
     # Optional trusted MCP gateway. Never a human OAuth or local agent credential.
     gateway_bearer_tokens: str = field(default="", repr=False)
     gateway_allowed_hosts: tuple[str, ...] = ()
+    # Browser login is independently configured; CLI/MCP remain bearer-only.
+    web_client_id: str = ""
+    web_client_secret: str = field(default="", repr=False)
+    web_session_key: str = field(default="", repr=False)
+    # Optional compatible directory adapter; keep provider admin keys outside the application.
+    directory_url: str = ""
+    directory_api_key: str = field(default="", repr=False)
     owner_subject: str = ""
     forgejo_url: str = ""
     forgejo_public_url: str = ""
@@ -60,6 +67,11 @@ class Settings:
             gateway_bearer_tokens=os.environ.get("WIKI_GATEWAY_BEARER_TOKENS", ""),
             gateway_allowed_hosts=tuple(host.strip() for host in
                                         os.environ.get("WIKI_GATEWAY_ALLOWED_HOSTS", "").split(",") if host.strip()),
+            web_client_id=os.environ.get("WIKI_WEB_CLIENT_ID", ""),
+            web_client_secret=os.environ.get("WIKI_WEB_CLIENT_SECRET", ""),
+            web_session_key=os.environ.get("WIKI_WEB_SESSION_KEY", ""),
+            directory_url=os.environ.get("WIKI_DIRECTORY_URL", "").rstrip("/"),
+            directory_api_key=os.environ.get("WIKI_DIRECTORY_API_KEY", ""),
             owner_subject=os.environ.get("WIKI_OWNER_SUBJECT", ""),
             forgejo_url=os.environ["FORGEJO_URL"].rstrip("/"),
             forgejo_public_url=os.environ["FORGEJO_PUBLIC_URL"].rstrip("/"),

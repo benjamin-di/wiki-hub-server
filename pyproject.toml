@@ -1,6 +1,6 @@
 [project]
 name = "wiki-hub"
-version = "0.15.11"
+version = "0.16.2"
 description = "Git-backed knowledge collections for people and agents"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -9,8 +9,13 @@ license-files = ["LICENSE"]
 authors = [{ name = "benjamin-di" }]
 
 dependencies = [
+    "authlib>=1.9.1,<2",
+    "cryptography>=46",
     "fastmcp==4.1.2",
     "httpx>=0.28,<0.29",
+    "httpx2>=2.16,<3",
+    "jinja2>=3.1.6,<4",
+    "joserfc>=1.6,<2",
     "keyring>=25,<26",
     "uvicorn>=0.35",
 ]
@@ -26,6 +31,7 @@ wiki-runner = "wiki_hub.runner:main"
 
 [dependency-groups]
 dev = [
+    "playwright>=1.56,<2",
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "pytest-xdist>=3.6",

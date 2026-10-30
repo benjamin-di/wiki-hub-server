@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}{{ wiki.title }} · Wiki Hub{% endblock %}
+{% block content %}
+<a class="back" href="/">← My wikis</a><div class="page-top"><div><div class="eyebrow">Wiki overview</div><h1>{{ wiki.title }}</h1><p class="muted">{{ wiki.slug }}</p></div>{% if wiki.manage %}<a class="button primary" href="/wikis/{{ wiki.slug }}/access">Share</a><a class="button" href="/wikis/{{ wiki.slug }}/settings">Settings</a>{% endif %}</div>
+<section class="panel"><h2>Your access</h2><p><span class="pill">{{ 'Owner' if wiki.owner else labels[wiki.role] }}</span></p><p class="muted">{{ descriptions[wiki.role] }}</p>{% if wiki.read_only %}<div class="notice">This wiki is archived or its archive update is pending. Its content is read only.</div>{% endif %}<p class="help">Managed Git copies and network drive access are {{ 'allowed by your current copy settings' if wiki.local_copies else 'unavailable under your current copy settings' }}.</p></section>
+<section class="panel"><h2>Use this wiki</h2><p class="muted">Connect through the Wiki CLI, your configured network drive or an agent with explicit access.</p><pre><code>wiki search {{ wiki.slug }} "your question"
+wiki read {{ wiki.slug }} wiki/index.md</code></pre><p class="help">Your current permissions apply to every connection. A wiki link does not grant access.</p></section>
+{% endblock %}

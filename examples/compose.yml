@@ -48,6 +48,11 @@ services:
       OIDC_ISSUER: ${OIDC_ISSUER:?set the identity issuer}
       OIDC_JWKS_URL: http://id:1411/.well-known/jwks.json
       WIKI_OIDC_CLIENT_ID: wiki-cli
+      WIKI_WEB_CLIENT_ID: wiki-web
+      WIKI_WEB_CLIENT_SECRET: ${WIKI_WEB_CLIENT_SECRET:-}
+      WIKI_WEB_SESSION_KEY: ${WIKI_WEB_SESSION_KEY:-}
+      WIKI_DIRECTORY_URL: ${WIKI_DIRECTORY_URL:-}
+      WIKI_DIRECTORY_API_KEY: ${WIKI_DIRECTORY_API_KEY:-}
       WIKI_OWNER_SUBJECT: ${WIKI_OWNER_SUBJECT:-}
       FORGEJO_URL: http://git:3000
       FORGEJO_PUBLIC_URL: ${FORGEJO_PUBLIC_URL:?set the public Git URL}
@@ -185,6 +190,7 @@ services:
     environment:
       POCKET_ID_INTERNAL_URL: http://id:1411
       POCKET_ID_STATIC_API_KEY: ${POCKET_ID_STATIC_API_KEY}
+      WIKI_WEB_CLIENT_SECRET: ${WIKI_WEB_CLIENT_SECRET:-}
       WIKI_PUBLIC_URL: ${WIKI_PUBLIC_URL}
       WIKI_OWNER_USERNAME: ${WIKI_OWNER_USERNAME:?set the existing owner username}
       WIKI_OWNER_EMAIL: ${WIKI_OWNER_EMAIL:-}

@@ -49,6 +49,57 @@ reproduced the old fixture's starvation and is retained in the regression;
 publication must still finish before archive returns. This changes test
 synchronization, not production archive ordering.
 
+## Follow-up storage and confirmation fixes
+
+The adjacent audit added these synthetic regressions. Each failure was reproduced
+on the reviewed baseline before its fix; the Unicode boundary case also verifies
+that a supported name still preserves the exact original bytes.
+
+| Trigger | Previous failure | Corrected behavior |
+|---|---|---|
+| Submit a long Unicode filename, including an attachment | Character-count validation allowed a name that exceeded the filesystem limit, sometimes only after the accepted job added its original-source prefix | Validate the 222-byte UTF-8 filename limit before staging any part or accepting a job; keep the existing 120-character limit |
+| Rebuild a writer's view after metadata loss while a directory cannot be enumerated | The recovery walker silently skipped its unpublished files, then the rebuild discarded the old view | Refuse the incomplete recovery scan and preserve the view until every directory can be read; retain its files before rebuilding |
+| Retry revocation against an old file-server report at the expected generation | The operation could report confirmation even though device status correctly reported the same observation as stale | Require a report no older than 60 seconds before acknowledging the requested account change; revocation stays pending until then |
+
+Regression anchor: [storage and confirmation failures](../tests/test_audit_regressions.py).
+These changes require no schema migration and do not truncate or rename sources.
+An unreadable directory prevents a complete recovery copy; operators must restore
+its readability before rebuilding or withdrawing an unknown view.
+
+## Browser and sharing audit
+
+The initial browser implementation was also reviewed for OIDC/session boundaries,
+current grants, directory admission, durable grant intent, explicit retries,
+optimistic concurrency and failure recovery. It calls the same service as the
+bearer APIs; cookies authorize only the browser routes.
+
+| Trigger | Previous failure | Corrected behavior |
+|---|---|---|
+| One browser refresh waits on the identity provider | A global refresh lock stalled all signed-in browsers | Serialize rotation per session; independent browsers continue, and completed locks are released |
+| The bounded unfinished-sign-in table is full | Transaction creation escaped the login error handler and returned an unhandled error | Return a safe, uncached, retryable 503 sign-in page |
+| A selected directory account is deleted before submission | A directory 404 appeared as a temporary service outage | Reject the selection with a 400 before recording permission intent; actual provider failures remain unavailable |
+| Focus/polling overlaps a successful role change | An older snapshot could replace the confirmed membership shown on screen | Ignore out-of-order refreshes and snapshots older than the currently rendered access version |
+| A manager edits two member rows and saves one | Refreshing confirmed membership silently discarded the other unsaved role | Preserve unchanged members' drafts and their Save controls without submitting them |
+
+Regression anchors: [signed synthetic identity and HTTP tests](../tests/test_web.py)
+and [real Chromium acceptance](../tests/test_web_browser.py). Existing regressions
+cover grant projection failures/restart, receipt replay, superseded retries,
+stale versions, reader isolation, local suspension and connected revocation.
+All identity, directory and backend endpoints are synthetic. The five new
+regressions reproduce their failures against the original browser implementation.
+
+Validation: `make check` passed with 475 tests and five skips (four opt-in browser
+cases and the platform-dependent check); `make check-browser` passed all four
+Chromium cases. JavaScript syntax and whitespace checks passed. All 12 browser
+modules/templates/assets in the built wheel match source. These checks establish
+source behavior, not real identity or installed-browser acceptance.
+
+Unlike the earlier fixes, the browser release adds SQLite tables for encrypted
+login/session state, display profiles, access versions and operation receipts.
+The copied-state rehearsal preserves existing ownership/grants and leaves its
+source database untouched. Live identity acceptance
+and human usability remain explicit [web follow-up work](web-ui.md#implementation-status-and-remaining-work).
+
 ## Boundaries and remaining work
 
 The implementation retains current-grant checks, explicit agent owner ceilings,
@@ -57,13 +108,15 @@ publication outcomes. The bundled worker has no privileged tools and cannot
 replace a page omitted from its context. These remain regression contracts,
 not a claim that the audit found every possible bug.
 
-No schema migration is required by these fixes. Cancellation may wait for an
+The earlier correctness fixes require no schema migration; the browser additions
+are described above. Cancellation may wait for an
 already running bounded Git/extraction operation to finish; abandoning its lock
 would restore the race. Archive remains a retention operation, and writable
 inbox provisioning alone does not implement capture, consent or storage quotas.
 
-The remaining product integration is the optional writable inbox's consent-aware
-consumer and storage limits, if that workflow is wanted. Core agent discovery,
+Remaining product work includes completing browser administration controls and,
+if that workflow is wanted, integrating the optional writable inbox's consent-aware
+consumer and storage limits. Core agent discovery,
 search, revision-pinned reads, recoverable ingestion and editable drive pages
 already exist. Release/publication, installed-client checks, representative
 knowledge/size measurements and a populated restore are acceptance work rather
@@ -74,3 +127,36 @@ The [roadmap](roadmap.md#outstanding-work-after-the-source-audit) separates
 remaining implementation/integration from model-quality measurements, release
 delivery and installed-client acceptance. Keep fleet inventories and live
 receipts in private operations records.
+
+## Additional filesystem regressions
+
+Two further reproductions failed on the reviewed baseline and now pass with
+synthetic sources and disposable repositories:
+
+| Trigger | Previous failure | Corrected behavior |
+|---|---|---|
+| Drive folder enumeration fails | The scan inferred deletions for accepted pages it could not enumerate | Keep pages beneath that folder, report it in the existing attention diagnostics and retry scanning; independent readable edits and actual deletions still proceed |
+| A valid wiki folder has a name ending in `.md` | The standalone worker tried to read the folder as a page and failed before calling the model | Skip the folder itself while including its Markdown child pages, after the existing path safety check |
+
+Regression anchors: unreadable root/nested folders and recovery in
+[test_drive.py](../tests/test_drive.py), and complete nested-page context in
+[test_runner.py](../tests/test_runner.py). These fixes require no schema change.
+
+The drive troubleshooting settings now match activation in source. Operations
+guidance also makes cold-copy downtime explicit: the journal cannot accept work
+while the process is stopped, and consumers retain unchanged submission IDs and
+originals for inspection or explicit replay after recovery.
+
+## Browser administration completion
+
+Settings/archive, agents, drive devices and owner-only account controls now call
+the existing service methods. They preserve pending backend intent and show
+one-time credentials without browser storage. Member-label refresh preserves
+grants through directory outages. Signed provider logout includes replay and
+concurrent-login fencing; protected pages recheck current access on focus.
+Sharing waits for its initial authorized snapshot before enabling new grants.
+
+The expanded offline identity/service suite and six Chromium cases cover these
+controls, pending copy retries, secret dismissal, agent revocation and manager
+revocation while settings remain open. Real provider, file-server, passkey and
+human usability acceptance remain installation work, recorded separately.

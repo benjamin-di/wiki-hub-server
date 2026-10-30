@@ -7,7 +7,8 @@ import secrets
 import tempfile
 from pathlib import Path
 
-SECRET_FIELDS = ("FORGEJO_PASSWORD", "POCKET_ID_ENCRYPTION_KEY", "POCKET_ID_STATIC_API_KEY")
+SECRET_FIELDS = ("FORGEJO_PASSWORD", "POCKET_ID_ENCRYPTION_KEY", "POCKET_ID_STATIC_API_KEY",
+                 "WIKI_WEB_CLIENT_SECRET", "WIKI_WEB_SESSION_KEY")
 
 
 def initialize(template, destination):

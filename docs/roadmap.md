@@ -21,18 +21,46 @@ The optional trusted-gateway transport is implemented with a separate backend
 credential and current per-wiki authorization; it does not replace direct OAuth
 or scoped agent access.
 
-Keep remaining work small: release and verify the audited fixes; configure the
-actual consuming agent and fill obvious index gaps on its installation; then
-try a handful of everyday questions and fix concrete failures. Keep facts in
-their granted wikis and installation receipts in private operations records.
-The existing thirty synthetic cases remain available for broader qualification;
-an evaluation framework, separate profile system, maintenance linter and new
-retrieval infrastructure are not prerequisites.
+The immediate product promise is to submit information once, preserve it
+faithfully, retrieve supported answers, enforce current access and recover
+failures without losing work. Prioritize completion of that workflow over new
+screens or transports.
 
-The broader qualification and optional workflows below remain separate. Qualify
-the actual consumer being adopted; unrelated Windows/SMB adoption does not block
-an agent workflow. Search remains lexical, fallback matching approximates FTS5,
-and scores from separate wiki indexes are not calibrated global relevance.
+| Order | Work | Observable completion |
+|---|---|---|
+| 1 | Finish the correctness release | Confirmed retention, filename and revocation defects are fixed; the installed release preserves sources, unpublished edits and current restrictions |
+| 2 | Recover email delivery after downtime | The consuming application retains exact source bytes, instructions and the submission ID before sending; bounded recovery uses that ID and exposes the eventual job/outcome without asking for another email |
+| 3 | Demonstrate knowledge quality and recovery | Run the existing thirty cases plus representative email/PDF/OCR inputs through the configured worker and consumer; inspect pages, answers and citations, measure the intended operating size and complete a populated restore |
+| 4 | Ship focused browser permissions | A person can find a wiki, share/change/revoke access and understand pending or uncertain changes; secure sessions, current authorization and accessible interaction are release requirements |
+
+Delivery recovery belongs in the existing consumer and its scheduler. Before a
+job is observed, replay only unchanged input with the same ID. Once a job is
+known, inspect/reconcile it; never automatically rerun failed, interrupted or
+uncertain model work, or repeat the whole email task's other side effects.
+Retain visible failures and require explicit action when recovery is paused.
+Older metadata-only receipts cannot reconstruct missing source bytes and must
+not be silently replayed with regenerated content. See
+[submission recovery](clients.md#recoverable-submissions-and-jobs).
+
+Browser acceptance starts with named sharing and revocation. The implemented
+copy/archive, device, agent and instance-owner controls remain available; they
+do not enlarge the immediate acceptance scope for clients that do not use them.
+Further administration features need demonstrated demand. The existing CLI
+remains supported, and provider-wide account administration stays in the identity
+provider. Qualify the implemented logout integration with its configured issuer;
+local suspension and current-grant enforcement remain required independently.
+
+The optional writable inbox is outside this immediate sequence. Introduce it
+only for a named workflow that existing email/API intake cannot serve; consent,
+storage limits, duplicate handling and recovery are prerequisites to exposing it.
+
+Keep facts in their granted wikis and installation/quality receipts private. Use
+the existing acceptance specification and a small results record; a new evaluation
+framework, profile system, maintenance linter or queue service is unnecessary.
+Qualify the actual consumer being adopted; unrelated Windows/SMB adoption does
+not block an agent workflow. Search remains lexical and scores from separate
+wiki indexes are not calibrated global relevance. Improve retrieval or context
+selection only after recorded misses show the smallest useful change.
 
 ## Product standard and architecture
 
@@ -79,6 +107,7 @@ These capabilities exist in source, separately from installation acceptance.
 |---|---|
 | Knowledge | Private wikis, preserved originals and extracted references, lexical search, history and rollback |
 | Human access | Explicit read/contribute/write/admin grants; the configured owner creates wikis and registers agents |
+| Browser access management | Dedicated OIDC sessions, wiki list/create, named sharing, role changes/removal, pending retries, durable receipts and grant activity; see [web scope](web-ui.md) |
 | Local copies | User/wiki copy settings, scoped Git credentials and current permission checks before synchronization |
 | Device sync | Single-copy and batch sync, opt-in discovery, exclusions, per-copy locks and structured failures |
 | Network drive | SMB drive per person following grants and copy policy; writers edit Markdown pages, published as attributed, merged commits with conflict copies; originals read-only; revocable device credentials; optional per-person writable inbox |
@@ -124,8 +153,11 @@ release or installation claim.
 
 | Work | What remains |
 |---|---|
+| Web installation acceptance | Configure the separate browser client and read-only directory key; qualify real My Apps discovery, pre-login recipient selection, delegated sharing and existing-session revocation; [checklist](web-ui.md#implementation-status-and-remaining-work) |
+| Browser control acceptance | Logout hooks, member-label refresh, settings, agents, devices and owner administration are implemented; qualify them on the installed identity and file server. Invitations/groups/expiry remain deferred |
 | Drive recovery and diagnostics | Implementation is complete; qualify recovery of unpublished edits and base metadata, per-page quiet periods and caller-owned diagnostics on the installed release |
-| Optional writable inbox | Integrate a consent-aware intake consumer and enforce storage limits before exposing the share. The Hub provisions folders; it does not poll or file them |
+| Optional writable inbox | Deferred until a named need is unmet by email/API intake. Consent, storage bounds and recovery must precede exposure; provisioning folders alone is insufficient |
+| Email delivery recovery | Qualify the consuming application through temporary downtime and restart, lost acknowledgement, accepted-job observation and paused recovery; no whole-agent or failed-model retry |
 | Knowledge quality and operating size | Run the existing 30-case specification through the configured worker and consumer; record retrieval, attribution, OCR accuracy and resource/latency measurements |
 | Installed clients | Accept each actual Windows, second-person and hosted-client flow, including conflicts, sleep/resume and connected revocation. Source tests do not establish device adoption |
 | Delivery and recovery | Track each source release, public export and running image separately; confirm installed client identities and rehearse a populated restore including unpublished drive edits and current restrictions |

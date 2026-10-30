@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  {% if csrf %}<meta name="csrf-token" content="{{ csrf }}">{% endif %}
+  <title>{% block title %}Wiki Hub{% endblock %}</title>
+  <link rel="icon" href="/ui/assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/ui/assets/app.css?v={{ version }}">
+  <script src="/ui/assets/app.js?v={{ version }}" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="app-shell">
+    <header class="app-header">
+      <a class="brand" href="/" aria-label="Wiki Hub home"><img src="/ui/assets/logo.svg" width="32" height="32" alt="">Wiki Hub</a>
+      {% if person %}
+      <div class="account"><span class="account-name">{{ person.name }}</span><button class="button subtle" id="logout">Sign out</button></div>
+      {% endif %}
+    </header>
+    {% if person %}<nav class="app-nav" aria-label="Main navigation"><a href="/">My wikis</a><a href="/connections">Connections</a><a href="/agents">Agents</a>{% if instance_owner %}<a href="/administration">Administration</a>{% endif %}</nav>{% endif %}
+    <main id="main" tabindex="-1">{% block content %}{% endblock %}</main>
+    <dialog id="credential-dialog" aria-labelledby="credential-title"><h2 id="credential-title">Save your new credentials</h2><p>These credentials are shown once. Store them securely before closing.</p><dl id="credential-values"></dl><button type="button" class="button primary" id="credential-close">I have saved them</button></dialog>
+    <footer class="app-footer"><span>Knowledge, with its sources.</span><span>Wiki Hub {{ version }}</span></footer>
+  </div>
+</body>
+</html>

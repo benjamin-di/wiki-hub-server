@@ -1,7 +1,7 @@
 # wiki-hub
 
 A small knowledge service built on Forgejo 17, Git LFS and Markdown. One application
-provides an authenticated API, MCP tools, ingestion jobs and the `wiki` CLI.
+provides a web interface, authenticated API, MCP tools, ingestion jobs and the `wiki` CLI.
 Original documents and accepted pages live in private Git repositories. Search is
 rebuildable. Ordinary ingests save automatically with source references and history.
 
@@ -15,6 +15,8 @@ Migration of existing knowledge is a separate step.
 - [Self-hosting](docs/self-hosting.md): a standalone Compose example with Forgejo
   17, Pocket ID and a restricted model worker.
 - [Clients](docs/clients.md): CLI, local MCP, hosted Claude/ChatGPT and agents.
+- [Web interface](docs/web-ui.md): browser sign-in, named sharing, roles and access activity;
+  launch from Pocket ID's My Apps dashboard.
 - [Network drive](docs/drive.md): one drive per person with exactly the wikis they
   may read and editable pages where they may write, over SMB on a LAN or private route.
   Windows connects with one PowerShell line and nothing to install.
@@ -44,6 +46,12 @@ Python 3.12+, Git and Git LFS are required. Run `make check`. Integration tests 
 temporary repositories and a fake sandbox; they never contact a production wiki.
 
 ## Usage
+
+To manage access in a browser, open your configured Wiki Hub URL, sign in and
+choose **My wikis → Share**. Search for a person, choose Viewer, Contributor,
+Editor or Manager, and add them. Change or remove access from the same page.
+Pending backend updates stay visible with an explicit retry action. See
+[web setup](docs/web-ui.md) to enable browser sign-in and the Pocket ID directory.
 
 Install with `uv tool install .`, then:
 

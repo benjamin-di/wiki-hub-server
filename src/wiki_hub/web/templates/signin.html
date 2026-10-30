@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Sign in · Wiki Hub{% endblock %}
+{% block content %}
+<section class="welcome">
+  <div class="eyebrow">Your knowledge, connected</div>
+  <h1>A home for your wikis.</h1>
+  <p class="lead">Find your shared knowledge and manage who can use it.</p>
+  {% if enabled %}
+  <a class="button primary" href="/auth/login?return_to={{ return_to }}">Sign in with your identity provider <span aria-hidden="true">↗</span></a>
+  <p class="help">Use the same account you use for your connected apps.</p>
+  {% else %}
+  <div class="notice"><strong>Browser sign-in needs configuration</strong><p>Your administrator can enable the web client. Existing CLI and agent connections continue to use their configured sign-in.</p><a href="https://github.com/benjamin-di/wiki-hub-server/blob/main/docs/web-ui.md" rel="noreferrer">Web setup guide ↗</a></div>
+  {% endif %}
+</section>
+{% endblock %}

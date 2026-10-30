@@ -206,8 +206,19 @@ sources and accepted reports.
 
 ## Recoverable submissions and jobs
 
+Unattended consumers retain exact source bytes, filing instructions and the
+submission ID durably before sending. A temporary outage should become visible
+pending delivery, without requiring the person to resend an email. Use the
+consumer's existing scheduler for bounded transport recovery with that same ID;
+Hub does not accept work while stopped. Once a job ID is observed, inspect that
+job instead of resubmitting its source. Failed/interrupted model work requires
+explicit action; uncertain publication can be observed for reconciliation.
+Never restart the whole email task and repeat its other successful actions.
+
 The HTTP `/api/wikis/WIKI/submissions` endpoint can submit a primary source and
-up to 19 `attachments`, each with `filename` and `content_base64`. All filenames
+up to 19 `attachments`, each with `filename` and `content_base64`. Source filenames
+must fit within 120 characters and 222 UTF-8 bytes, leaving room for the stored
+original's job prefix. All filenames
 must be distinct ignoring case. The decoded bytes share `WIKI_UPLOAD_LIMIT`;
 the request also permits bounded JSON metadata, including the full 4,000-character
 filing instruction. The submission ID binds all parts and instructions to one

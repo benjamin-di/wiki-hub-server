@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import uuid
+from importlib.resources import files
 from pathlib import Path
 
 import httpx
@@ -50,7 +51,7 @@ def items(client, path):
     raise SetupError("Identity listing is incomplete")
 
 
-def configure(client, wiki_url, owner_username, *, create_owner=False, owner_email=""):
+def configure(client, wiki_url, owner_username, *, create_owner=False, owner_email="", web_client_secret=None):
     owners = [u for u in items(client, "/api/users") if u.get("username") == owner_username]
     if not owners and create_owner:
         if not owner_username or not owner_email:
@@ -95,8 +96,42 @@ def configure(client, wiki_url, owner_username, *, create_owner=False, owner_ema
             "userDelegatedAccess": True, "clientAccess": False,
             "userDelegatedPermissionIds": [permission["id"]], "clientPermissionIds": [],
         })
+    if web_client_secret is not None:
+        if len(web_client_secret) < 32:
+            raise SetupError("Prepare WIKI_WEB_CLIENT_SECRET with examples/initialize.py before web setup")
+        identifier = "wiki-web"
+        callback = wiki_url.rstrip("/") + "/auth/callback"
+        previous = registered.get(identifier)
+        if previous:
+            if (previous.get("isPublic") is not False or not previous.get("pkceEnabled")
+                    or previous.get("skipConsent") is not False or previous.get("callbackURLs") != [callback]
+                    or previous.get("launchURL") != wiki_url.rstrip("/") + "/"
+                    or previous.get("backchannelLogoutURL") != wiki_url.rstrip("/") + "/auth/backchannel-logout"):
+                raise SetupError("An existing web client's configuration differs; review it before changing it")
+        else:
+            created = request(client, "POST", "/api/oidc/clients", json={
+                "id": identifier, "name": "Wiki Hub", "description": "Your wikis and access settings",
+                "isPublic": False, "pkceEnabled": True, "skipConsent": False,
+                "callbackURLs": [callback], "launchURL": wiki_url.rstrip("/") + "/",
+                "backchannelLogoutURL": wiki_url.rstrip("/") + "/auth/backchannel-logout",
+                "isGroupRestricted": False, "accessTokenDurationMinutes": 15, "refreshTokenDurationMinutes": 720,
+            })
+            request(client, "POST", f"/api/oidc/clients/{identifier}/secrets", json={"secret": web_client_secret})
+            # Pocket ID may create an initial secret; keep only the configured one.
+            initial = (created or {}).get("createdSecret")
+            if initial:
+                request(client, "DELETE", f"/api/oidc/clients/{identifier}/secrets/{initial['id']}")
+        if not previous or not previous.get("hasLogo"):
+            logo = files("wiki_hub").joinpath("web/static/logo.svg").read_bytes()
+            request(client, "POST", f"/api/oidc/clients/{identifier}/logo", params={"light": "true"},
+                    files={"file": ("wiki-hub.svg", logo, "image/svg+xml")})
+        request(client, "PUT", f"/api/apis/{api['id']}/clients/{identifier}", json={
+            "userDelegatedAccess": True, "clientAccess": False,
+            "userDelegatedPermissionIds": [permission["id"]], "clientPermissionIds": [],
+        })
     return {"owner_subject": owners[0]["id"], "client_id": "wiki-cli", "resource": resource,
-            "scope": "openid offline_access wiki:access"}
+            "scope": "openid offline_access wiki:access",
+            **({"web_client_id": "wiki-web"} if web_client_secret is not None else {})}
 
 
 def enroll(client, subject, issuer, destination):
@@ -121,7 +156,8 @@ def main():
                       headers={"X-API-KEY": os.environ["POCKET_ID_STATIC_API_KEY"]},
                       timeout=30, trust_env=False, follow_redirects=False) as client:
         result = configure(client, os.environ["WIKI_PUBLIC_URL"], os.environ["WIKI_OWNER_USERNAME"],
-                           create_owner=args.create_owner, owner_email=os.environ.get("WIKI_OWNER_EMAIL", ""))
+                           create_owner=args.create_owner, owner_email=os.environ.get("WIKI_OWNER_EMAIL", ""),
+                           web_client_secret=os.environ.get("WIKI_WEB_CLIENT_SECRET"))
         if args.enrolment_file:
             enroll(client, result["owner_subject"], os.environ["OIDC_ISSUER"], args.enrolment_file)
             result["enrolment_url_written"] = True

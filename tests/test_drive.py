@@ -559,6 +559,39 @@ async def test_a_git_pushed_link_cannot_redirect_drive_publication(
     assert job["status"] == "failed" and not job["candidate_revision"]
 
 
+@pytest.mark.parametrize("blocked", ["wiki", "wiki/guides"])
+async def test_unreadable_drive_folders_are_not_deletions(drive_service, agent, drive_settings, monkeypatch, blocked):
+    await writer(drive_service, agent)
+    commit(drive_service, "starter", "wiki/guides/keep.md", "Keep this accepted page.\n")
+    await drive_service.refresh_drive("starter")
+    number = person(drive_service, "reader")
+    state = drive_service.drive.view_state(number, "starter")
+    root = view(drive_settings, drive_service, "reader") / "starter"
+    blocked_path = root / blocked
+    if blocked != "wiki":
+        (root / "wiki/index.md").unlink()
+        (root / "wiki/new.md").write_text("An independent save.\n")
+    scandir = os.scandir
+
+    def unavailable(path):
+        if os.fspath(path) == str(blocked_path):
+            raise PermissionError(13, "Synthetic unreadable folder", str(blocked_path))
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", unavailable)
+    scan = drive_service.drive.scan(number, "starter", state)
+    if blocked == "wiki":
+        assert scan["edits"] == {}
+    else:
+        assert set(scan["edits"]) == {"wiki/index.md", "wiki/new.md"}
+        assert scan["edits"]["wiki/index.md"] is None and scan["edits"]["wiki/new.md"]
+    assert blocked in scan["invalid"]
+    assert state["base"]["wiki/guides/keep.md"]
+    monkeypatch.undo()
+    recovered = drive_service.drive.scan(number, "starter", state)
+    assert not recovered["invalid"] and "wiki/guides/keep.md" not in recovered["edits"]
+
+
 async def test_a_persons_file_where_a_folder_arrives_is_set_aside(drive_service, agent, drive_settings):
     await writer(drive_service, agent)
     folder = view(drive_settings, drive_service, "reader") / "starter" / "wiki"

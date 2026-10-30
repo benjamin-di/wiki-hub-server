@@ -58,7 +58,9 @@ docker compose --env-file .env -f examples/compose.yml run --rm identity-setup \
 The helper creates the named administrator only if absent, checks that public
 first-account setup has closed, preserves matching clients and refuses
 incompatible client settings. It enables only human-delegated `wiki:access`;
-it creates no client secret or machine grant. Put the returned `owner_subject`
+it creates no machine grant. With the generated web secret, it also registers a
+separate confidential `wiki-web` client with PKCE, an exact browser callback,
+launch URL and logo. Its configured secret is used only by the server. Put the returned `owner_subject`
 in `.env` as `WIKI_OWNER_SUBJECT`; this is an identifier, not a credential.
 
 Enable your HTTPS proxy routes; [the Caddy example](../examples/Caddyfile) shows
@@ -76,6 +78,13 @@ uv tool install .
 wiki --server https://wiki.example.com login
 wiki create starter --title "Starter wiki"
 ```
+
+Open `WIKI_PUBLIC_URL` in a browser, or launch Wiki Hub from Pocket ID's **My
+Apps**. To search people before their first Wiki Hub login, supply a dedicated
+read-only directory key as described in [web setup](web-ui.md). Existing `.env`
+files gain web secrets when `examples/initialize.py` is run again; retain those
+values when repeating identity setup. Never replace the directory key with the
+bootstrap static administrator key.
 
 `WIKI_HUB_IMAGE` can select the matching published image instead of a local build.
 Pin a release version or digest deliberately when operating a server. Back up

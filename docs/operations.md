@@ -22,9 +22,13 @@ jobs, including rollback. See [submission recovery](clients.md#recoverable-submi
 
 Back up application state, working copies and Forgejo configuration/database and
 repositories/LFS. In the example stack these are the `app`, `workspaces`,
-`git-data` and `git-config` volumes. Stop Wiki writes briefly for a consistent
-snapshot, restart the services, then encrypt and upload that copy off-site using
-your normal backup tooling. The example also owns its dedicated `identity` volume;
+`git-data` and `git-config` volumes. Stop writes for a consistent snapshot,
+restart the services, then encrypt and upload that copy off-site using your
+normal backup tooling. If consistency requires stopping the application for
+the copy, API/MCP reads and ingestion are unavailable for that entire interval.
+Measure the pause with populated state; a cold copy is not necessarily brief.
+
+The example also owns its dedicated `identity` volume;
 a shared identity provider needs independent backup ownership. Wiki backup or
 restore must never stop or overwrite shared production identity. Test combined
 recovery using an isolated restored provider. Keep identity encryption and backup
@@ -67,6 +71,16 @@ For an upgrade, retain the exact old image/configuration and a matching state
 snapshot. Rehearse schema changes on a copy. An image rollback alone does not
 roll back its database. Keep an existing wiki system separate until the new
 system's pilot and migration/recovery plan are accepted.
+
+## Client recovery after downtime
+
+A stopped application cannot accept a submission into its journal. Consumers
+retain original source bytes, filing instructions and the submission ID until
+they confirm a job outcome. After service recovery, inspect authorized jobs or
+explicitly replay the unchanged submission with the same ID. A lost response
+does not establish that nothing was accepted; using a new ID can duplicate work.
+Failed, interrupted and uncertain jobs require inspection and explicit action,
+not an automatic model retry. See [submission recovery](clients.md#recoverable-submissions-and-jobs).
 
 ## Upgrade acceptance
 

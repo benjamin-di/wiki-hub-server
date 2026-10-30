@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}My wikis · Wiki Hub{% endblock %}
+{% block content %}
+<div class="page-top"><div><div class="eyebrow">Your workspace</div><h1>My wikis</h1><p class="muted">Shared knowledge and the people who can use it.</p></div>{% if instance_owner %}<button class="button primary" id="create-open">+ Create wiki</button>{% endif %}</div>
+<div id="message" class="status" role="status" aria-live="polite"></div>
+{% if wikis %}
+<div class="toolbar"><label class="search-label" for="wiki-search">Find a wiki</label><input type="search" id="wiki-search" placeholder="Search your wikis…" autocomplete="off"><label class="checkbox"><input type="checkbox" id="show-archived"> Show archived</label></div>
+<section class="wiki-list" aria-label="Your wikis">
+  {% for wiki in wikis %}
+  <article class="wiki-card" data-wiki-name="{{ wiki.title }}" data-archived="{{ 'true' if wiki.read_only else 'false' }}" {% if wiki.read_only %}hidden{% endif %}>
+    <div class="wiki-icon" aria-hidden="true">W</div><div class="wiki-info"><a class="wiki-title" href="/wikis/{{ wiki.slug }}">{{ wiki.title }}</a><p class="muted small">{{ wiki.slug }}{% if wiki.read_only %} · Content is read only{% endif %}</p></div>
+    <span class="pill">{{ 'Owner' if wiki.owner else labels[wiki.role] }}</span>{% if wiki.read_only %}<span class="pill">Archived</span>{% endif %}
+    {% if wiki.manage %}<a class="button" href="/wikis/{{ wiki.slug }}/access">Share</a>{% else %}<a class="button subtle" href="/wikis/{{ wiki.slug }}">Open <span aria-hidden="true">→</span></a>{% endif %}
+  </article>
+  {% endfor %}
+</section><p id="wiki-no-match" class="empty muted" hidden>No wikis match your filters.</p>
+{% else %}<section class="empty"><h2>Your first shared wiki starts here.</h2><p class="muted">When someone grants you access, that wiki will appear here.</p>{% if instance_owner %}<p>Choose <strong>Create wiki</strong> to start a collection.</p>{% else %}<p class="help">Ask a wiki manager to add you using your name or account email.</p>{% endif %}</section>{% endif %}
+<details class="account-details"><summary>Your account details</summary><p class="help">For support with your Wiki Hub access.</p><dl><dt>Name</dt><dd>{{ person.name }}</dd><dt>Account subject</dt><dd><code>{{ person.subject }}</code></dd></dl></details>
+{% if instance_owner %}
+<dialog id="create-dialog" aria-labelledby="create-title"><form id="create-form"><div class="dialog-top"><h2 id="create-title">Create a wiki</h2><button type="button" class="button subtle close-dialog" aria-label="Close create wiki dialog">✕</button></div><label for="wiki-title">Wiki title</label><input id="wiki-title" required maxlength="200" placeholder="Team handbook"><label for="wiki-slug">Short name</label><input id="wiki-slug" required maxlength="63" pattern="[a-z][a-z0-9\-]*" placeholder="team-handbook"><p class="help">Used in links and connections. Start with a lowercase letter, then use letters, numbers and hyphens.</p><div id="create-error" class="status" role="alert"></div><div class="dialog-actions"><button type="button" class="button close-dialog">Cancel</button><button class="button primary" type="submit">Create wiki</button></div></form></dialog>
+{% endif %}
+{% endblock %}

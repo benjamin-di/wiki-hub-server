@@ -134,6 +134,12 @@ class DriveUnavailable(DriveError):
     """The file server did not confirm a requested account change in time."""
 
 
+def scan_failed(error):
+    # os.walk otherwise silently skips unreadable directories. Missing their
+    # pages cannot establish deletions or a complete recovery copy.
+    raise DriveError("The drive folder scan could not complete; restore access and retry.") from error
+
+
 def device_account(number):
     return f"wd{number}"
 
@@ -689,15 +695,22 @@ class Drive:
         cache = state.setdefault("stat", {})
         rejected = state.get("rejected", {})
         seen, files, ignored, unpublishable, invalid, present = {}, {}, [], [], {}, set()
-        linked = []  # Folders replaced by links: their pages are neither read nor deleted.
+        unavailable = []  # Unreadable or linked folders cannot establish page deletions.
+
+        def unreadable(error):
+            folder = Path(error.filename) if error.filename else live
+            relative = folder.relative_to(root).as_posix()
+            unavailable.append(relative + "/")
+            invalid[relative] = "This folder could not be read; its pages were kept."
+
         real = live.is_dir() and not live.is_symlink()
         if real:
-            for directory, subdirectories, names in os.walk(live):
+            for directory, subdirectories, names in os.walk(live, onerror=unreadable):
                 kept = []
                 for name in subdirectories:
                     full = Path(directory) / name
                     if full.is_symlink():
-                        linked.append("wiki/" + full.relative_to(live).as_posix() + "/")
+                        unavailable.append("wiki/" + full.relative_to(live).as_posix() + "/")
                     elif not name.startswith(".") and not SET_ASIDE.fullmatch(name):
                         kept.append(name)
                 subdirectories[:] = kept
@@ -746,7 +759,7 @@ class Drive:
         if real:
             edits.update({path: None for path in state["base"]
                           if path not in present and EDITABLE.fullmatch(path.rsplit("/", 1)[-1])
-                          and not path.startswith(tuple(linked))})
+                          and not path.startswith(tuple(unavailable))})
         # Track content, including deletions, independently of the stat cache.
         # Rehashing after publication or changing another page must not delay it.
         pending, stamp = state.get("pending", {}), time.time()
@@ -863,7 +876,7 @@ class Drive:
             # With no trustworthy base, every regular file may be someone's work.
             # Never infer edits/deletions or republish this recovery copy.
             paths = set()
-            for directory, subdirectories, names in os.walk(live):
+            for directory, subdirectories, names in os.walk(live, onerror=scan_failed):
                 subdirectories[:] = [name for name in subdirectories if not (Path(directory) / name).is_symlink()]
                 for name in names:
                     full = Path(directory) / name

@@ -195,7 +195,7 @@
   if (sources) {
     const base = "/ui/api/wikis/" + encodeURIComponent(sources.dataset.wiki);
     const receiptKey = "wiki-submission:" + sources.dataset.subject + ":" + sources.dataset.wiki;
-    let pending = null, sending = false, checkingSubmission = false, refreshing = false, timer, polls = 0;
+    let pending = null, sending = false, checkingSubmission = false, refreshing = false, refreshAgain = false, timer, polls = 0;
     try { pending = JSON.parse(sessionStorage.getItem(receiptKey)); } catch { /* Storage may be disabled. */ }
     if (!pending || typeof pending.id !== "string" || typeof pending.fingerprint !== "string") pending = null;
     function remember(value) {
@@ -226,7 +226,8 @@
       polls = 0;
     }
     async function refreshSources() {
-      if (stopped || refreshing || document.hidden) return;
+      if (stopped || document.hidden) return;
+      if (refreshing) { refreshAgain = true; return; }
       refreshing = true; clearTimeout(timer);
       try {
         const result = await request(base + "/sources");
@@ -258,7 +259,10 @@
           timer = setTimeout(refreshSources, 3000);
         }
       } catch (error) { if (!stopped) message(error.message, true, "sources-error"); }
-      finally { refreshing = false; }
+      finally {
+        refreshing = false;
+        if (refreshAgain) { refreshAgain = false; refreshSources(); }
+      }
     }
     function chooseKind() {
       const text = document.querySelector('[name="source-kind"]:checked')?.value === "text";
@@ -347,6 +351,10 @@
             notice(recovering && error.status && error.status < 500
               ? error.message + " The earlier submission is still unconfirmed. Check its status before retrying."
               : "Submission could not be confirmed. Check its status before retrying. Your source has not been cleared.", true);
+            if (!error.status || error.status === 429 || error.status >= 500) {
+              polls = 0;
+              await refreshSources();
+            }
           }
         }
       } finally {

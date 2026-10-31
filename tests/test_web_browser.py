@@ -881,6 +881,7 @@ def test_browser_denied_retry_retains_an_earlier_unconfirmed_submission(running_
         page = browser.new_page()
         browser_sign_in(page, identity, public)
         page.get_by_role("link", name="Team handbook", exact=True).click()
+        expect(page.locator("#source-jobs")).to_contain_text("No sources submitted yet.")
         page.get_by_label("File", exact=True).set_input_files({
             "name": "archive-retry.txt", "mimeType": "text/plain", "buffer": b"Original workshop source"})
         submissions = []
@@ -908,4 +909,57 @@ def test_browser_denied_retry_retains_an_earlier_unconfirmed_submission(running_
         expect(page.locator("#source-message")).to_contain_text("Source received")
         assert len(submissions) == 3 and len(set(submissions)) == 1
         assert len(app.state.service.state.jobs("starter")) == 1
+        browser.close()
+
+
+def test_browser_lost_reply_queues_refresh_after_older_empty_snapshot(running_web):
+    app, identity, public = running_web
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        browser_sign_in(page, identity, public)
+        held = []
+        reads = []
+        submissions = []
+
+        def requests(route):
+            if route.request.method == 'GET':
+                reads.append(route.request.url)
+                if len(reads) == 1:
+                    response = route.fetch()
+                    assert response.json()['jobs'] == []
+                    held.append((route, response))
+                    return
+            else:
+                submissions.append(route.request.post_data_json['submission_id'])
+                route.fetch()
+                route.abort()
+                return
+            route.continue_()
+
+        page.route(public + '/ui/api/wikis/starter/sources', requests)
+        page.get_by_role('link', name='Team handbook', exact=True).click()
+        deadline = time.monotonic() + 5
+        while not held and time.monotonic() < deadline:
+            page.wait_for_timeout(10)
+        assert held
+        page.get_by_label('File', exact=True).set_input_files({
+            'name': 'held-refresh.txt', 'mimeType': 'text/plain', 'buffer': b'Synthetic workshop source'})
+        page.get_by_role('button', name='Add source', exact=True).click()
+        expect(page.locator('#source-message')).to_contain_text('could not be confirmed')
+        expect(page.get_by_role('button', name='Add source', exact=True)).to_be_enabled()
+        assert len(reads) == 1  # Recovery is queued behind the old response.
+        assert page.evaluate("sessionStorage.getItem('wiki-submission:owner:starter') !== null")
+        assert page.get_by_label('File', exact=True).input_value().endswith('held-refresh.txt')
+        route, response = held[0]
+        route.fulfill(response=response)
+        expect(page.locator('#source-jobs')).to_contain_text('Saved automatically', timeout=15000)
+        assert len(reads) >= 2
+        assert len(submissions) == 1
+        assert len(app.state.service.state.jobs('starter')) == 1
+        assert page.evaluate("sessionStorage.getItem('wiki-submission:owner:starter') !== null")
+        assert page.get_by_label('File', exact=True).input_value().endswith('held-refresh.txt')
+        page.get_by_role('button', name='Check submission', exact=True).click()
+        expect(page.locator('#source-message')).to_contain_text('Source received')
+        assert page.evaluate("sessionStorage.getItem('wiki-submission:owner:starter') === null")
         browser.close()

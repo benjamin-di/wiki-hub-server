@@ -2,6 +2,17 @@
 
 All notable changes are recorded here. This project follows Semantic Versioning.
 
+## [0.18.2] - 2026-10-31
+
+### Fixed
+
+- Refresh source activity after an unconfirmed submission reply, including when an older activity request is still running. Keep the original receipt and draft until the submission is confirmed (78a3aa4).
+
+### Upgrade
+
+- Action required: none.
+- Rollback: compatible with 0.18.1; no catalog schema changes.
+
 ## [0.18.1] - 2026-10-31
 
 _No changes to the published package; correct standalone export qualification fixtures._

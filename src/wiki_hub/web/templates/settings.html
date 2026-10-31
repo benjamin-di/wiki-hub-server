@@ -5,13 +5,13 @@
 <h1>Wiki settings</h1><p class="muted">{{ wiki.title }}</p><div id="message" class="status" role="status"></div>
 <section class="panel"><h2>Managed copies</h2><p>Allow managed Git copies and network drive access. Each person's own copy settings also apply.</p>
 {% if copies.pending %}<div class="notice">Copy settings are pending. API access follows current grants; Git or drive access may retain its previous state. Retry to finish the update.</div>{% endif %}
-<form class="manage-form" data-endpoint="/ui/api/wikis/{{ wiki.slug }}/settings" data-confirm="Changing copy access can disconnect Git copies and network drives. Previously downloaded files cannot be recalled.">
+<form class="manage-form" data-endpoint="/ui/api/wikis/{{ wiki.slug }}/settings" data-pending-message="Copy settings are pending. Git or drive access may retain its previous state. Refresh status or retry the same setting to finish." data-confirm="Changing copy access can disconnect Git copies and network drives. Previously downloaded files cannot be recalled.">
 <label class="checkbox"><input type="checkbox" name="local_copies" {% if copies.local_copies %}checked{% endif %}> Allow managed copies and drive access</label>
 <button class="button primary" type="submit">{{ 'Retry copy settings' if copies.pending else 'Save copy settings' }}</button></form></section>
 <section class="panel"><h2>Archive</h2><p>Archived content stays readable. Content edits and unfinished ingests stop; sharing remains available.</p>
 <p>Current state: <strong>{{ archive.status }}</strong></p>
 {% if archive.pending %}<div class="notice">The archive update is pending. Content remains read only until its backend update completes. Retry the requested change below.</div>{% endif %}
-<form class="manage-form" data-endpoint="/ui/api/wikis/{{ wiki.slug }}/archive" data-confirm="This changes content access and managed Git credentials for everyone using this wiki.">
+<form class="manage-form" data-endpoint="/ui/api/wikis/{{ wiki.slug }}/archive" data-pending-message="The archive update is pending. Content remains read only until the backend update completes. Refresh status or retry the requested setting." data-confirm="This changes content access and managed Git credentials for everyone using this wiki.">
 <label for="archive-state">Content access</label><select id="archive-state" name="archived" data-boolean><option value="true" {% if archive.status in ['archiving','archived'] %}selected{% endif %}>Archived · read only</option><option value="false" {% if archive.status not in ['archiving','archived'] %}selected{% endif %}>Open for edits</option></select>
 <button class="button primary" type="submit">{{ 'Retry archive update' if archive.pending else 'Save archive setting' }}</button></form></section>
 {% endblock %}

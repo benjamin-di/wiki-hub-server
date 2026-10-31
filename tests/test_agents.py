@@ -222,3 +222,60 @@ def test_agent_cli_never_refreshes_or_uses_human_oauth(tmp_path):
 
     client = cli.APIClient("https://wiki.example.test", store, httpx.Client(transport=httpx.MockTransport(handle)))
     assert client.request("GET", "/api/wikis") == []
+
+
+async def test_actor_observations_are_scoped_throttled_and_never_restore_access(service):
+    from wiki_hub.auth import GatewayAccessToken
+
+    human = AccessToken(token='synthetic', client_id='example-app', scopes=['wiki:access'], claims={'sub': 'owner'})
+    assert service.observe_access(human) == 'owner'
+    first = (await service.apps('owner'))[0]
+    service.observe_access(human)
+    assert (await service.apps('owner')) == [first]
+    assert await service.apps('stranger') == []
+    gateway = GatewayAccessToken(**human.model_dump())
+    service.observe_access(gateway)
+    assert {row['transport'] for row in await service.apps('owner')} == {'oauth', 'gateway'}
+    agent = await service.add_agent('owner', 'Reader')
+    token = AccessToken(token=agent['credential'], client_id='wiki-agent', scopes=['wiki:access'],
+                        claims={'sub': agent['id']})
+    service.observe_access(token)
+    assert service.state.agent(agent['id'])['last_seen'] is not None
+    assert len(await service.apps('owner')) == 2  # services are not human apps
+    await service.revoke_agent('owner', agent['id'])
+    with pytest.raises(Denied):
+        service.observe_access(token)
+    with pytest.raises(ContentError):
+        await service.update_agent('owner', agent['id'], 'Name\nforged', '')
+    with pytest.raises(ContentError):
+        await service.update_agent('owner', agent['id'], 'Name', 'x' * 501)
+    service.state.set_user_status('owner', True)
+    with pytest.raises(Denied):
+        service.observe_access(human)
+
+
+def test_access_metadata_schema_rehearsal_preserves_copied_legacy_records(settings, tmp_path):
+    import shutil
+
+    from wiki_hub.state import State
+
+    state = State(settings.state_dir)
+    state.add_agent('agent:retained', 'owner', 'Retained history', 'synthetic-local-key')
+    state.revoke_agent('owner', 'agent:retained')
+    with state.connect() as db:
+        db.execute('ALTER TABLE agents DROP COLUMN purpose')
+        db.execute('ALTER TABLE agents DROP COLUMN last_seen')
+        db.execute('ALTER TABLE jobs DROP COLUMN client_id')
+        db.execute('DROP TABLE observed_apps')
+        db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+    before = state.path.read_bytes()
+    copied = tmp_path / 'schema-copy'
+    copied.mkdir()
+    shutil.copy2(state.path, copied / state.path.name)
+    upgraded = State(copied)
+    row = upgraded.agent('agent:retained')
+    assert row['revoked'] and row['name'] == 'Retained history'
+    assert row['purpose'] == '' and row['last_seen'] is None
+    assert upgraded.token_agent('synthetic-local-key') is None
+    State(copied)  # migration is idempotent
+    assert state.path.read_bytes() == before

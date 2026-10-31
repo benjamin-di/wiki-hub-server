@@ -20,6 +20,20 @@ appear once and are cleared when dismissed; save them securely first. Only the
 configured instance owner can register agents or administer account suspension
 and per-person copy policy. Delegated wiki managers cannot use those global controls.
 
+If an agent-key or device-password response is lost, the form asks you to review
+the registrations and stops another submission from that page. Open **Review
+agents** or **Review devices**, revoke the new registration whose secret you did
+not receive, then create a replacement. Creation times and device account names
+help distinguish registrations. The secret cannot be retrieved again.
+
+Copy, archive and account settings record their requested state in the existing
+control plane. After a lost response, refresh status before retrying the same
+setting. Pending messages explain the affected control; partial member-name
+refresh leaves wiki permissions unchanged. Status reads never retry a mutation.
+Grant changes retain their stronger version checks and durable receipts. Other
+settings do not provide a general operation journal or stale-edit protection;
+review current state before changing a setting from an old tab.
+
 Source checks cover grant changes, pending recovery, session revocation and
 administrative authorization. See [audit findings](audit.md#browser-and-sharing-audit).
 Installation acceptance still requires:
@@ -158,6 +172,9 @@ once. Access/refresh tokens and CSRF secrets are encrypted in SQLite, not expose
 to JavaScript, browser storage or URLs. Sessions expire after an hour idle or
 twelve hours absolute. Tokens are verified and local active-account/current-wiki
 checks run on protected requests, including after token refresh.
+Temporary provider refresh errors return a retryable 503 while retaining the
+encrypted session. After the provider recovers, a new request can refresh normally;
+an invalid or revoked refresh grant still requires sign-in again.
 
 Cookie-authenticated operations live under `/ui/api/`, with Origin and CSRF checks
 for mutations. Existing `/api/` and `/mcp` authentication remains unchanged; browser
@@ -179,3 +196,44 @@ valid until expiry. For immediate local offboarding, use **Administration** or
 the existing suspension command. Account/owned-agent blocking is immediate;
 managed credential revocation must finish before the update reports success.
 Current per-wiki grants apply independently to already connected sessions.
+
+Administration lists accounts already known through ownership, grants or settings.
+It refreshes their names from the configured directory when the page opens,
+including people who have never signed into the browser. **Refresh names** retries
+an unavailable lookup without changing account settings or unsaved form edits.
+Saved labels remain visible during an outage; unresolved subjects stay visible
+for recovery. Labels never grant access or change suspension, copy policy or
+provider admission.
+
+## Access overview
+
+**Wiki access** (`/agents`) separates registered services from observed apps that
+use a person's OAuth sign-in. Services show effective wiki roles, capped by the
+owner's current permissions, with archived wikis shown as Viewer. Pending grants
+are not effective access. Owners can edit service names and purpose without
+changing IDs, bindings, credentials or grants. Revoked records remain collapsed
+for historical attribution.
+
+Usage tracking starts on upgrade and records authenticated activity, including
+reads. It stores no request content. Times update at most every five minutes;
+this is an observation history, not a session or identity-provider consent list.
+Apps using a shared human sign-in cannot be distinguished from that client ID.
+Local-copy readers are outside this list. Disconnect apps in their host and
+identity provider; already issued tokens can remain valid until expiry.
+
+Set `WIKI_AUTHORIZED_APPS_URL` to the provider's self-service authorization page
+when available; otherwise the page links to the configured issuer. Wiki Hub does
+not request a provider administrator credential for this feature.
+
+Authenticated API additions:
+
+- `GET /api/me/apps`: apps observed for the caller only.
+- `POST /api/agents/{id}` with `name` and optional `purpose`: edit an owned service.
+- `GET /api/agents`: includes purpose, last-seen time, credential type and effective wikis.
+
+New ingest jobs expose `client_id`, and their accepted commits retain a `Client:`
+trailer alongside `Principal:`. Existing jobs keep unknown client attribution.
+Public API or MCP arguments and headers cannot override the verified client.
+A trusted gateway may assert `X-Wiki-Client` alongside `X-Wiki-Subject`, but must
+overwrite both from verified token claims on every upstream request. Missing
+client assertions remain identified as an unspecified gateway app.

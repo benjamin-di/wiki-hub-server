@@ -80,6 +80,7 @@ bearer APIs; cookies authorize only the browser routes.
 | A selected directory account is deleted before submission | A directory 404 appeared as a temporary service outage | Reject the selection with a 400 before recording permission intent; actual provider failures remain unavailable |
 | Focus/polling overlaps a successful role change | An older snapshot could replace the confirmed membership shown on screen | Ignore out-of-order refreshes and snapshots older than the currently rendered access version |
 | A manager edits two member rows and saves one | Refreshing confirmed membership silently discarded the other unsaved role | Preserve unchanged members' drafts and their Save controls without submitting them |
+| Refresh returns a structured temporary OAuth error | `server_error` or `temporarily_unavailable` was treated as a revoked grant and deleted the browser session | Return a retryable 503 and retain the encrypted session; the next request can refresh after recovery. A revoked `invalid_grant` still ends the session |
 
 Regression anchors: [signed synthetic identity and HTTP tests](../tests/test_web.py)
 and [real Chromium acceptance](../tests/test_web_browser.py). Existing regressions
@@ -100,6 +101,38 @@ The copied-state rehearsal preserves existing ownership/grants and leaves its
 source database untouched. Live identity acceptance
 and human usability remain explicit [web follow-up work](web-ui.md#implementation-status-and-remaining-work).
 
+### Browser follow-up audit
+
+Two additional regressions cover the browser/client boundary and restored pages:
+
+| Trigger | Previous failure | Corrected behavior |
+|---|---|---|
+| Register the configured browser client as an agent workload | The retained workload binding made subsequent human browser tokens fail authentication, including after agent revocation | Reject both configured human-login client IDs before creating a workload binding |
+| Restore the Share page from the browser's page cache after access was removed | The cached member list and open sharing dialog remained visible without a focus or visibility event | Recheck current management access on a persisted `pageshow` event and clear protected content on denial |
+
+The signed synthetic HTTP regression checks that rejected registration preserves
+the current session and a fresh login. The Chromium regression revokes a separate
+browser's grant through the bearer API, then restores its Share page with an open
+dialog. These fixes add no schema changes and do not alter existing grants or
+identity-provider registrations. Real sign-in and a second person's own session
+remain installation acceptance work.
+
+### Browser administration recovery
+
+Lost credential-creation replies lead to review and revocation before a
+replacement is created; partial member-label refresh and pending settings have
+specific status messages. Sharing confirmation waits for the refreshed access
+snapshot, so a subsequent change uses its current version. An unavailable
+snapshot leaves an explicit reload instruction rather than a claim that current
+membership is displayed, including when a lost response is recovered through its
+operation receipt.
+
+The [browser regressions](../tests/test_web_browser.py) exercise lost replies,
+delayed and unavailable snapshots, device confirmation, account suspension and
+archive recovery with fake identity, Git and file-server endpoints. This adds
+no schema or general administrative operation framework. Installation and human
+usability acceptance remain separate.
+
 ## Boundaries and remaining work
 
 The implementation retains current-grant checks, explicit agent owner ceilings,
@@ -114,9 +147,10 @@ already running bounded Git/extraction operation to finish; abandoning its lock
 would restore the race. Archive remains a retention operation, and writable
 inbox provisioning alone does not implement capture, consent or storage quotas.
 
-Remaining product work includes completing browser administration controls and,
-if that workflow is wanted, integrating the optional writable inbox's consent-aware
-consumer and storage limits. Core agent discovery,
+Browser administration controls are implemented; installed identity/directory and
+human acceptance remain separate. Remaining product work includes integrating
+the optional writable inbox's consent-aware consumer and storage limits if that
+workflow is wanted. Core agent discovery,
 search, revision-pinned reads, recoverable ingestion and editable drive pages
 already exist. Release/publication, installed-client checks, representative
 knowledge/size measurements and a populated restore are acceptance work rather

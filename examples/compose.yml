@@ -48,6 +48,7 @@ services:
       OIDC_ISSUER: ${OIDC_ISSUER:?set the identity issuer}
       OIDC_JWKS_URL: http://id:1411/.well-known/jwks.json
       WIKI_OIDC_CLIENT_ID: wiki-cli
+      WIKI_AUTHORIZED_APPS_URL: ${WIKI_AUTHORIZED_APPS_URL:-}
       WIKI_WEB_CLIENT_ID: wiki-web
       WIKI_WEB_CLIENT_SECRET: ${WIKI_WEB_CLIENT_SECRET:-}
       WIKI_WEB_SESSION_KEY: ${WIKI_WEB_SESSION_KEY:-}

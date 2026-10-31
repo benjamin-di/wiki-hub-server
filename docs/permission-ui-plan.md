@@ -16,6 +16,13 @@ screens below retain the design intent; installation and usability acceptance
 remain separate. The permission journal records grants rather than all policy
 or account administration.
 
+Completion now prioritizes installed acceptance and concrete recovery/usability
+failures. Keep state-setting controls on their existing service contracts;
+do not generalize grant receipts, concurrency versions or activity logging to
+every administration form without a demonstrated need. A lost credential reply
+requires review and revocation of the unusable registration before replacement.
+See [supported behavior](web-ui.md#implementation-status-and-remaining-work).
+
 ## Recommendation
 
 Give Wiki Hub a small, polished web application at its existing public origin.

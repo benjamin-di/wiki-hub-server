@@ -118,3 +118,19 @@ async def test_gateway_rechecks_grants_suspension_and_pending_changes_without_re
             service.state.set_user_status("reader", True)
             assert (await post(client, "reader", "wiki_read", page))["isError"]
             assert not (await post(client, "owner", "wiki_read", page)).get("isError")
+
+
+def test_gateway_records_only_authenticated_assertions_and_rejects_ambiguous_clients(settings, service):
+    app = create_app(replace(settings, gateway_bearer_tokens=KEY), service, HumanVerifier())
+    with TestClient(app, base_url=settings.public_url,
+                    headers={'Accept': 'application/json, text/event-stream'}) as client:
+        result = client.post('/gateway/mcp', headers={**headers(), 'X-Wiki-Client': 'example-app'}, json=call())
+        assert result.status_code == 200 and not result.json()['result'].get('isError')
+        apps = asyncio.run(service.apps('owner'))
+        assert apps[0]['client_id'] == 'example-app' and apps[0]['transport'] == 'gateway'
+        for supplied in ({**headers(), 'X-Wiki-Client': 'first,second'},
+                         [*headers().items(), ('X-Wiki-Client', 'first'), ('X-Wiki-Client', 'second')]):
+            assert client.post('/gateway/mcp', headers=supplied, json=call()).status_code == 401
+        assert client.post('/gateway/mcp', headers={**headers(key='wrong'), 'X-Wiki-Client': 'forged'},
+                           json=call()).status_code == 401
+        assert len(asyncio.run(service.apps('owner'))) == 1

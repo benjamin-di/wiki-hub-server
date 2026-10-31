@@ -85,10 +85,18 @@
     event.preventDefault(); $("credential-close").focus();
   });
   for (const form of document.querySelectorAll(".manage-form")) {
+    let submitting = false, reviewRequired = false;
+    function review(text, label = "Refresh status", href = location.href) {
+      message(text, true);
+      const link = element("a", label, "button"); link.href = href;
+      $("message").append(element("br"), link);
+    }
     form.addEventListener("submit", async event => {
       event.preventDefault();
+      if (submitting || reviewRequired || stopped) return;
       if (form.dataset.confirm && !window.confirm(form.dataset.confirm)) return;
-      const button = event.submitter;
+      const button = event.submitter || form.querySelector('[type="submit"]');
+      submitting = true;
       button.disabled = true;
       const data = {};
       for (const input of form.querySelectorAll("[name]")) {
@@ -107,13 +115,52 @@
           }
           $("credential-dialog").showModal(); $("credential-close").focus();
         } else if (result.pending) {
-          message("This update is pending. Access may retain its previous backend state. Refresh to check, or retry the same setting to finish.", true);
-          const refresh = element("a", "Refresh status", "button"); refresh.href = location.href;
-          $("message").append(element("br"), refresh);
+          review(form.dataset.pendingMessage || "This update is pending. Refresh its status before retrying.");
         } else location.reload();
-      } catch (error) { if (!stopped) message(error.message, true); }
-      finally { button.disabled = false; }
+      } catch (error) {
+        if (!stopped) {
+          if (!error.status || error.status >= 500) {
+            if (form.dataset.registration) {
+              reviewRequired = true;
+              const agent = form.dataset.registration === "agent";
+              review(agent
+                ? (data.client_id ? "The agent registration could not be confirmed. Review your agents before registering again."
+                  : "The agent may have been registered, but its key was not received. Review your agents and revoke the new registration before trying again.")
+                : "The device may have been created, but its password was not received. Review your devices and revoke the new device before creating another.",
+                agent ? "Review agents" : "Review devices", agent ? "/agents" : "/connections");
+            } else {
+              review("The result could not be confirmed. Refresh status before retrying; the change may already have been applied.");
+            }
+          } else message(error.message, true);
+        }
+      } finally { submitting = false; button.disabled = reviewRequired; }
     });
+  }
+
+  const refreshNames = $("refresh-account-names");
+  if (refreshNames) {
+    const refreshAccountNames = async () => {
+      if (refreshNames.disabled || stopped) return;
+      refreshNames.disabled = true;
+      message("Updating account names…", false, "profile-message");
+      try {
+        const result = await request("/ui/api/accounts/profiles", {});
+        if (stopped) return;
+        const people = new Map(result.people.map(person => [person.subject, person]));
+        for (const row of document.querySelectorAll("[data-account]")) {
+          const person = people.get(row.dataset.account);
+          if (!person) continue;
+          row.querySelector("[data-account-name]").textContent = person.name;
+          row.querySelector("[data-account-detail]").textContent = person.email || person.username || person.subject;
+        }
+        message(result.unavailable
+          ? "Some account names could not be refreshed. Saved names and account settings remain available. Try Refresh names again shortly."
+          : "Account names updated.", Boolean(result.unavailable), "profile-message");
+      } catch (error) { if (!stopped) message(error.message, true, "profile-message"); }
+      finally { refreshNames.disabled = false; }
+    };
+    refreshNames.addEventListener("click", refreshAccountNames);
+    refreshAccountNames();
   }
 
   const root = $("access-page");
@@ -275,6 +322,7 @@
         }
       }
       schedulePoll();
+      return true;
     } catch (error) { if (!stopped && serial === loadSerial) message(error.message, true); }
   }
   async function mutate(subject, role, button, identifier, retry = false, feedbackId = "message") {
@@ -285,10 +333,17 @@
       const result = await request(base + "/access", {subject, role, version: state.version,
         operation_id: operationId, retry});
       dirty = false; polls = 0;
+      message("Access change recorded. Refreshing current access…");
+      const refreshed = await loadAccess(true, subject);
+      if (stopped) return;
+      if (!refreshed) {
+        message("The change was recorded. Reload access to check its current status before making another change.", true);
+        $("stale-notice").hidden = false;
+        return result.operation;
+      }
       message(result.operation.status === "pending"
         ? "This update is pending. Retry when the backend is available."
         : "Access change confirmed. Current access is shown below.");
-      await loadAccess(true, subject);
       return result.operation;
     } catch (error) {
       if (!stopped) {
@@ -296,10 +351,17 @@
           message(error.message, true, feedbackId); $("stale-notice").hidden = false;
         } else if (!error.status) {
           dirty = false;
-          await loadAccess(true, subject);
+          message("The reply was lost. Checking current access…");
+          const refreshed = await loadAccess(true, subject);
+          if (stopped) return;
           try {
             const observed = await request(base + "/operation?id=" + encodeURIComponent(operationId));
             if (["completed", "pending"].includes(observed.operation.status)) {
+              if (!refreshed) {
+                message("The change was recorded. Reload access to check its current status before making another change.", true);
+                $("stale-notice").hidden = false;
+                return observed.operation;
+              }
               message(observed.operation.status === "completed"
                 ? "The recorded change is confirmed. Current access is shown below."
                 : "The recorded change is pending. Retry when the backend is available.");
@@ -373,5 +435,6 @@
   });
   document.addEventListener("visibilitychange", () => { if (!document.hidden && !stopped) { polls = 0; loadAccess(); } });
   window.addEventListener("focus", () => { if (!stopped) loadAccess(); });
+  window.addEventListener("pageshow", event => { if (event.persisted && !stopped) loadAccess(); });
   loadAccess();
 })();

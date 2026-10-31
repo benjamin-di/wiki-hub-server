@@ -1,9 +1,41 @@
 {% extends "base.html" %}
-{% block title %}Agents · Wiki Hub{% endblock %}
-{% block content %}<h1>Your agents</h1><p class="muted">Agents need explicit wiki grants and cannot exceed their owner's current access.</p><div id="message" class="status" role="status"></div>
-{% for agent in agents %}<section class="panel"><h2>{{ agent.name }}</h2><p><code>{{ agent.id }}</code></p><p>{{ 'Revoked' if agent.revoked else 'Active · no access without a wiki grant' }}</p>
-{% if not agent.revoked %}<form class="manage-form" data-endpoint="/ui/api/agents/{{ agent.id }}/revoke" data-confirm="Revoke this agent? Its current API and MCP access will stop."><button class="button danger" type="submit">Revoke {{ agent.name }}</button></form>{% endif %}</section>{% else %}<p>No agents registered to your account.</p>{% endfor %}
-{% if instance_owner %}<section class="panel"><h2>Register an agent</h2><p>Use a registered workload client where available. A local agent key is shown once. Registration grants no wiki access.</p>
-<form class="manage-form" data-endpoint="/ui/api/agents"><label for="agent-name">Agent name</label><input id="agent-name" name="name" maxlength="120" required>
-<label for="agent-client">Pocket ID workload client ID (optional)</label><input id="agent-client" name="client_id" maxlength="160" autocomplete="off"><p class="help">Leave empty for a local agent key. This does not create an identity-provider registration.</p><button class="button primary" type="submit">Register agent</button></form></section>{% endif %}
-<p class="help">Open a wiki's Share page to add one of your active agents as a Viewer or Contributor.</p>{% endblock %}
+{% block title %}Access to your wikis · Wiki Hub{% endblock %}
+{% block content %}
+<h1>Access to your wikis</h1>
+<p class="muted">See which services have their own wiki access and which apps act as you.</p>
+<div id="message" class="status" role="status"></div>
+<h2>Services acting for you</h2>
+<p>These are software identities registered in Wiki Hub, not AI models or chat sessions. Each needs its own wiki grants and cannot exceed your current access. Revoke a service here to stop its API and MCP access.</p>
+{% for agent in agents if not agent.revoked %}
+<section class="panel">
+<h3>{{ agent.name }}</h3>
+<p>{{ agent.purpose or 'No purpose has been added. Add one below so you can recognize this service.' }}</p>
+<p class="help">{{ 'Identity-provider workload' if agent.credential_type == 'workload' else 'Local agent key' }} · Owned by you</p>
+{% if agent.wikis %}<ul>{% for wiki in agent.wikis %}<li><a href="/wikis/{{ wiki.slug }}">{{ wiki.title }}</a> · {{ 'Contributor' if wiki.role == 'contribute' else 'Viewer' }}</li>{% endfor %}</ul>{% else %}<p>No wiki access</p>{% endif %}
+<p class="help">Last used: {% if agent.last_seen %}<time datetime="{{ agent.last_seen }}">{{ agent.last_seen[:19] | replace('T', ' ') }} UTC</time>{% else %}Not observed yet{% endif %}</p>
+<details><summary>Edit service details</summary>
+<form class="manage-form" data-endpoint="/ui/api/agents/{{ agent.id }}">
+<label for="name-{{ agent.id }}">Name</label><input id="name-{{ agent.id }}" name="name" value="{{ agent.name }}" maxlength="120" required>
+<label for="purpose-{{ agent.id }}">Purpose</label><input id="purpose-{{ agent.id }}" name="purpose" value="{{ agent.purpose }}" maxlength="500">
+<button class="button" type="submit">Save details</button></form>
+<p class="help">Registered <time datetime="{{ agent.created }}">{{ agent.created[:19] | replace('T', ' ') }} UTC</time> · <code>{{ agent.id }}</code></p>
+</details>
+<form class="manage-form" data-endpoint="/ui/api/agents/{{ agent.id }}/revoke" data-confirm="Revoke this service? Its current API and MCP access will stop."><button class="button danger" type="submit">Revoke {{ agent.name }}</button></form>
+</section>{% else %}<p>No active services registered to your account.</p>{% endfor %}
+<p class="help">Open a wiki's Share page to grant an active service Viewer or Contributor access.</p>
+{% set revoked = agents | selectattr('revoked') | list %}
+{% if revoked %}<details class="panel"><summary>Revoked services ({{ revoked | length }})</summary><p class="help">Retained so past jobs and access records can still be identified. These services have no access.</p>
+{% for agent in revoked %}<h3>{{ agent.name }}</h3><p>{{ agent.purpose }}</p><p class="help"><code>{{ agent.id }}</code> · Revoked</p>{% endfor %}</details>{% endif %}
+<h2>Apps signed in as you</h2>
+<p>These apps use your current wiki permissions. Their sign-ins do not create a service registration. An app used by a background job still acts as you when it uses your sign-in.</p>
+{% for app in apps %}<section class="panel"><h3>{{ app.client_id }}</h3>
+<p>{{ 'Through the gateway' if app.transport == 'gateway' else 'OAuth sign-in' }}</p>
+{% if app.client_id == 'trusted-gateway' and app.transport == 'gateway' %}<p class="help">The gateway did not identify the originating app.</p>{% endif %}
+<p class="help">Last used: <time datetime="{{ app.last_seen }}">{{ app.last_seen[:19] | replace('T', ' ') }} UTC</time></p></section>
+{% else %}<p>No apps observed yet.</p>{% endfor %}
+<p>To disconnect an app, remove its Wiki Hub connection and manage its authorization in <a href="{{ authorized_apps_url }}" rel="noreferrer">your identity provider</a>. Wiki Hub cannot revoke that authorization here. Already issued tokens may remain valid until they expire.</p>
+<p class="help">This list shows authenticated requests observed since usage tracking began. Times update at most once every five minutes. It is not a list of current sessions or every tool that can read a local copy.</p>
+{% if instance_owner %}<details class="panel"><summary>Register a service</summary>
+<form class="manage-form" data-endpoint="/ui/api/agents" data-registration="agent"><label for="agent-name">Service name</label><input id="agent-name" name="name" maxlength="120" required>
+<label for="agent-client">Workload client ID (optional)</label><input id="agent-client" name="client_id" maxlength="160" autocomplete="off"><p class="help">Use an existing identity-provider workload, or leave empty to issue a local agent key. Registration gives no wiki access until you add a grant.</p><button class="button primary" type="submit">Register service</button></form></details>{% endif %}
+{% endblock %}

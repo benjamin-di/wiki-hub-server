@@ -22,7 +22,7 @@ from .forgejo import ForgejoError
 from .gitstore import ContentError, GitError
 from .service import ARCHIVE_STATES, ROLES, Busy, Denied
 from .state import AccessConflict
-from .web_identity import BrowserIdentity, PocketDirectory
+from .web_identity import BrowserIdentity, IdentityUnavailable, PocketDirectory
 from .web_state import BrowserState
 
 log = logging.getLogger(__name__)
@@ -116,12 +116,15 @@ class BrowserWeb:
                     session["token"] = await self.identity.refresh(session["token"], session["subject"])
                     self.store.update_session(identifier, session["token"], session["csrf"])
                 await self.identity.verify_access(session["token"], session["subject"])
-            except (ValueError, KeyError, OAuthError):
+            except (ValueError, KeyError, OAuthError) as exc:
+                if isinstance(exc, OAuthError) and exc.error in ("server_error", "temporarily_unavailable"):
+                    raise IdentityUnavailable("The identity provider is temporarily unavailable.") from None
                 self.store.delete_session(identifier)
                 raise LoginRequired from None
         if not self.store.session(identifier, self.settings.oidc_issuer):
             raise LoginRequired  # A provider notification may have arrived during refresh.
         self.service.require_active(session["subject"])
+        self.service.state.observe_actor(session["subject"], self.settings.web_client_id)
         return session
 
     def check_csrf(self, request, session, token=None):
@@ -194,7 +197,10 @@ class BrowserWeb:
                       "drive_enabled": self.service.drive.enabled}
             slug = request.path_params.get("slug")
             if request.url.path == "/agents":
-                return self.render("agents", agents=await self.service.agents(subject), **common)
+                return self.render("agents", agents=await self.service.agents(subject),
+                                   apps=await self.service.apps(subject),
+                                   authorized_apps_url=self.settings.authorized_apps_url or self.settings.oidc_issuer,
+                                   **common)
             if request.url.path == "/connections":
                 recipient = request.query_params.get("subject", subject)
                 if recipient != subject and not common["instance_owner"]:
@@ -210,7 +216,7 @@ class BrowserWeb:
                 for person in people:
                     person.update(status=self.service.state.user_status(person["subject"]),
                                   copies=self.service.state.copy_setting("user", person["subject"]))
-                return self.render("administration", people=people, **common)
+                return self.render("administration", people=people, directory=self.directory.enabled, **common)
             if not slug:
                 wikis = [self.summarize(subject, row["slug"]) for row in self.service.state.list_wikis(subject)]
                 return self.render("home", wikis=wikis, **common)
@@ -351,6 +357,29 @@ class BrowserWeb:
         if subject != self.settings.owner_subject:
             raise Denied("Only the configured owner manages instance accounts.")
 
+    async def refresh_profiles(self, recipients, authorize):
+        """Resolve known labels in small batches; lookup never changes permissions."""
+        failed = 0
+
+        async def refresh(recipient):
+            nonlocal failed
+            if recipient.startswith(("agent:", "client-")):
+                return
+            try:
+                value = await self.directory.display(recipient)
+                authorize()
+                self.store.put_profile(self.settings.oidc_issuer, value)
+            except Denied:
+                raise
+            except Exception:
+                failed += 1
+
+        recipients = list(recipients)
+        for start in range(0, len(recipients), 4):
+            await asyncio.gather(*(refresh(recipient) for recipient in recipients[start:start + 4]))
+        authorize()
+        return failed
+
     async def controls(self, request, subject, path):
         """Browser controls reuse service authorization and projection contracts."""
         data = await self.body(request) if request.method == "POST" else {}
@@ -364,6 +393,8 @@ class BrowserWeb:
             return await self.service.add_agent(subject, data["name"])
         if len(path) == 3 and path[0] == "agents" and path[2] == "revoke" and post:
             return await self.service.revoke_agent(subject, path[1])
+        if len(path) == 2 and path[0] == "agents" and post:
+            return await self.service.update_agent(subject, path[1], data["name"], data.get("purpose", ""))
         if path == ["devices"]:
             if post:
                 return await self.service.add_drive_device(subject, data["name"])
@@ -375,6 +406,14 @@ class BrowserWeb:
             return await self.service.revoke_drive_device(subject, path[1])
         if len(path) == 2 and path[0] == "accounts" and post:
             self.require_owner(subject)
+            if path[1] == "profiles":
+                if not self.directory.enabled:
+                    raise ContentError("The identity directory is not available for refreshing names.")
+                self.rate_search(subject)
+                failed = await self.refresh_profiles(
+                    (person["subject"] for person in self.store.people(self.settings.oidc_issuer)),
+                    lambda: self.require_owner(subject))
+                return {"people": self.store.people(self.settings.oidc_issuer), "unavailable": failed}
             recipient = data["subject"]
             if path[1] == "status":
                 if type(data.get("suspended")) is not bool:
@@ -395,26 +434,7 @@ class BrowserWeb:
                 self.rate_search(subject)
                 wiki = self.service.state.wiki(slug)
                 recipients = {wiki["owner"], *(g["subject"] for g in self.service.state.grants(slug))}
-                failed = 0
-                semaphore = asyncio.Semaphore(4)
-
-                async def refresh(recipient):
-                    nonlocal failed
-                    if recipient.startswith(("agent:", "client-")):
-                        return
-                    async with semaphore:
-                        try:
-                            value = await self.directory.display(recipient)
-                            self.service.allowed(subject, slug, "admin")
-                            self.store.put_profile(self.settings.oidc_issuer, value)
-                        except Denied:
-                            raise
-                        except Exception:
-                            failed += 1
-                recipients = list(recipients)
-                for start in range(0, len(recipients), 4):
-                    await asyncio.gather(*(refresh(recipient) for recipient in recipients[start:start + 4]))
-                self.service.allowed(subject, slug, "admin")
+                failed = await self.refresh_profiles(recipients, lambda: self.service.allowed(subject, slug, "admin"))
                 return {"refreshed": True, "unavailable": failed, "pending": bool(failed)}
             if operation == "settings":
                 if post and type(data.get("local_copies")) is not bool:

@@ -267,3 +267,33 @@ async def test_pinned_server_sdk_rejects_a_new_submission_argument_on_a_legacy_t
         result = await client.call_tool("wiki_ingest", {"wiki": "pilot", "filename": "note.txt",
             "content_base64": "eA==", "submission_id": "retained-id"}, raise_on_error=False)
     assert result.is_error and invoked == []
+
+
+async def test_rest_and_remote_mcp_record_verified_clients_and_ignore_public_headers(settings, service):
+    app = create_app(settings, service, FixtureVerifier())
+    async with app.router.lifespan_context(app), httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=settings.public_url) as client:
+        headers = {'Authorization': 'Bearer owner-token', 'X-Wiki-Client': 'forged-client'}
+        response = await client.get('/api/me/apps', headers=headers)
+        assert response.status_code == 200
+        assert response.json()[0]['client_id'] == 'test-cli'
+        assert await service.apps('stranger') == []
+        await service.create('owner', 'starter', 'Starter')
+        job = await client.post('/api/wikis/starter/ingest', headers=headers, json={
+            'filename': 'source.txt', 'content_base64': base64.b64encode(b'Synthetic source').decode(),
+            'client_id': 'forged-client'})
+        assert job.status_code == 202 and job.json()['client_id'] == 'test-cli'
+        await asyncio.gather(*service.tasks)
+        mcp_headers = {**headers, 'Accept': 'application/json, text/event-stream'}
+        response = await client.post('/mcp', headers=mcp_headers, json={
+            'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+            'params': {'name': 'wiki_ingest', 'arguments': {
+                'wiki': 'starter', 'filename': 'mcp-source.txt',
+                'content_base64': base64.b64encode(b'Synthetic MCP source').decode()}}})
+        assert response.status_code == 200, response.text
+        result = response.json()['result']
+        assert not result.get('isError'), result
+        assert result['structuredContent']['client_id'] == 'test-cli'
+        await asyncio.gather(*service.tasks)
+        service.state.set_user_status('owner', True)
+        assert (await client.get('/api/me/apps', headers=headers)).status_code == 403

@@ -101,6 +101,8 @@ def create_app(settings=None, service=None, verifier=None, *, web_transport=None
         if kind.lower() != "bearer" or not bearer:
             return None
         token = await verifier.verify_token(bearer)
+        request.state.access = token
+        request.state.client_id = token.client_id if token else None
         return principal_subject(token) if token else None
 
     async def body(request):
@@ -130,6 +132,7 @@ def create_app(settings=None, service=None, verifier=None, *, web_transport=None
         path = request.path_params["path"].strip("/").split("/")
         try:
             service.require_active(caller)
+            service.observe_access(request.state.access)
             if path == ["me"] and request.method == "GET":
                 return JSONResponse({"subject": caller, "owner": caller == settings.owner_subject})
             if path == ["me", "inbox"] and request.method == "GET":
@@ -164,6 +167,12 @@ def create_app(settings=None, service=None, verifier=None, *, web_transport=None
                 return JSONResponse(await service.add_workload_agent(
                     caller, data["name"], data["client_id"], data.get("owner"),
                 ), status_code=201, headers={"Cache-Control": "no-store"})
+            if path == ["me", "apps"] and request.method == "GET":
+                return JSONResponse(await service.apps(caller), headers={"Cache-Control": "no-store"})
+            if len(path) == 2 and path[0] == "agents" and request.method == "POST":
+                data = await body(request)
+                return JSONResponse(await service.update_agent(caller, path[1], data["name"], data.get("purpose", "")),
+                                    headers={"Cache-Control": "no-store"})
             if path == ["drive"] and request.method == "GET":
                 return JSONResponse(await service.drive_status(caller), headers={"Cache-Control": "no-store"})
             if path == ["drive", "devices"]:
@@ -251,6 +260,7 @@ def create_app(settings=None, service=None, verifier=None, *, web_transport=None
                         return JSONResponse(await service.ingest(
                             caller, wiki, data["filename"], data["content_base64"], data.get("instructions", ""),
                             data.get("submission_id"), data.get("attachments"),
+                            client_id=request.state.client_id,
                         ), status_code=202)
                     if operation == "archive":
                         if type(data.get("archived")) is not bool:

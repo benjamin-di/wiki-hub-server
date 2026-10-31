@@ -342,11 +342,12 @@ class GitStore:
         reference = f"reference/{job_id}.txt"
         validate_edits(changed, previous, available, reference if reference in available else None)
 
-    def publish(self, wiki, repo, work, base, subject, job_id, prepared=None):
+    def publish(self, wiki, repo, work, base, subject, job_id, prepared=None, *, client_id=None):
         self.validate(work)
         self.run(work, "add", "--all", "--", *sorted(CONTENT_DIRS))
         self.validate_modes(work, staged=True)
-        self.run(work, "commit", "-m", f"Ingest source\n\nPrincipal: {subject}\nJob: {job_id}")
+        client = f"\nClient: {client_id}" if client_id else ""
+        self.run(work, "commit", "-m", f"Ingest source\n\nPrincipal: {subject}\nJob: {job_id}{client}")
         return self._push_commit(wiki, repo, work, base, prepared=prepared, job_id=job_id)
 
     def cleanup(self, repo, work):

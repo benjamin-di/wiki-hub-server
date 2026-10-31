@@ -4,7 +4,7 @@ import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 
@@ -45,6 +45,10 @@ class State:
                     agent TEXT PRIMARY KEY REFERENCES agents(id), issuer TEXT NOT NULL,
                     client_id TEXT NOT NULL, subject TEXT NOT NULL,
                     UNIQUE(issuer,client_id), UNIQUE(issuer,subject));
+                CREATE TABLE IF NOT EXISTS observed_apps (
+                    subject TEXT NOT NULL, client_id TEXT NOT NULL, transport TEXT NOT NULL,
+                    first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+                    PRIMARY KEY(subject,client_id,transport));
                 CREATE TABLE IF NOT EXISTS copy_settings (
                     kind TEXT NOT NULL CHECK(kind IN ('user','wiki')), key TEXT NOT NULL,
                     enabled INTEGER NOT NULL, pending INTEGER NOT NULL, updated TEXT NOT NULL,
@@ -83,10 +87,14 @@ class State:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(jobs)")}
             for name, declaration in {
                 "submission_id": "TEXT", "fingerprint": "TEXT", "candidate_revision": "TEXT",
-                "kind": "TEXT NOT NULL DEFAULT 'ingest'",
+                "kind": "TEXT NOT NULL DEFAULT 'ingest'", "client_id": "TEXT",
             }.items():
                 if name not in columns:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {name} {declaration}")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(agents)")}
+            for name, declaration in {"purpose": "TEXT NOT NULL DEFAULT ''", "last_seen": "TEXT"}.items():
+                if name not in columns:
+                    db.execute(f"ALTER TABLE agents ADD COLUMN {name} {declaration}")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS job_submissions ON jobs(wiki,subject,submission_id)")
         self.path.chmod(0o600)
 
@@ -339,7 +347,8 @@ class State:
 
     def agent(self, identifier):
         with self.connect() as db:
-            row = db.execute("SELECT id,owner,name,revoked,created FROM agents WHERE id=?", (identifier,)).fetchone()
+            row = db.execute("SELECT id,owner,name,purpose,last_seen,revoked,created FROM agents WHERE id=?",
+                             (identifier,)).fetchone()
         if row is None:
             return None
         result = dict(row)
@@ -384,13 +393,37 @@ class State:
     def agents(self, owner):
         with self.connect() as db:
             rows = [dict(row) for row in db.execute(
-                "SELECT id,owner,name,revoked,created FROM agents WHERE owner=? ORDER BY created,id", (owner,),
+                "SELECT id,owner,name,purpose,last_seen,revoked,created FROM agents WHERE owner=? ORDER BY created,id",
+                (owner,),
             )]
         for row in rows:
             binding = self.workload_binding(row["id"])
             if binding:
                 row["workload"] = binding
         return rows
+
+    def update_agent(self, owner, identifier, name, purpose):
+        with self.connect() as db:
+            return db.execute("UPDATE agents SET name=?,purpose=? WHERE owner=? AND id=?",
+                              (name, purpose, owner, identifier)).rowcount > 0
+
+    def observe_actor(self, subject, client_id, transport="oauth"):
+        stamp = now()
+        cutoff = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+        with self.connect() as db:
+            if subject.startswith("agent:"):
+                db.execute("UPDATE agents SET last_seen=? WHERE id=? AND revoked=0 "
+                           "AND (last_seen IS NULL OR last_seen<?)", (stamp, subject, cutoff))
+            else:
+                db.execute("""INSERT INTO observed_apps VALUES(?,?,?,?,?)
+                    ON CONFLICT(subject,client_id,transport) DO UPDATE SET last_seen=excluded.last_seen
+                    WHERE observed_apps.last_seen<?""", (subject, client_id, transport, stamp, stamp, cutoff))
+
+    def observed_apps(self, subject):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT client_id,transport,first_seen,last_seen FROM observed_apps WHERE subject=? "
+                "ORDER BY last_seen DESC,client_id", (subject,))]
 
     def revoke_agent(self, owner, identifier):
         with self.connect() as db:
@@ -422,14 +455,14 @@ class State:
             db.execute("UPDATE wikis SET status=? WHERE slug=?", ("archived" if archived else "ready", slug))
 
     def add_job(self, job_id, wiki, subject, filename, source_path, instructions,
-                submission_id=None, fingerprint=None, kind="ingest"):
+                submission_id=None, fingerprint=None, kind="ingest", client_id=None):
         stamp = now()
         with self.connect() as db:
             db.execute(
                 "INSERT INTO jobs(id,wiki,subject,filename,source_path,instructions,status,created,updated,"
-                "submission_id,fingerprint,kind) VALUES(?,?,?,?,?,?,'queued',?,?,?,?,?)",
+                "submission_id,fingerprint,kind,client_id) VALUES(?,?,?,?,?,?,'queued',?,?,?,?,?,?)",
                 (job_id, wiki, subject, filename, source_path, instructions, stamp, stamp,
-                 submission_id, fingerprint, kind),
+                 submission_id, fingerprint, kind, client_id),
             )
 
     def submission(self, subject, wiki, identifier):

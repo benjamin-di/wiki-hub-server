@@ -4,7 +4,6 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_access_token
 
-from .auth import principal_subject
 from .forgejo import ForgejoError
 from .gitstore import ContentError, GitError
 from .search import lines, outline
@@ -38,8 +37,10 @@ def create_mcp(service, auth=None, subject_provider=None, errors=(), *, tool_pre
 
     async def call(method, *args):
         try:
-            subject = subject_provider() if subject_provider else principal_subject(get_access_token())
-            return await getattr(service, method)(subject, *args)
+            access = None if subject_provider else get_access_token()
+            subject = subject_provider() if subject_provider else service.observe_access(access)
+            kwargs = {"client_id": access.client_id} if method == "ingest" and access else {}
+            return await getattr(service, method)(subject, *args, **kwargs)
         except (Denied, ContentError, GitError, ForgejoError, *errors) as exc:
             raise ToolError(str(exc)) from None
 

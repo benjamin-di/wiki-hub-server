@@ -371,3 +371,48 @@ async def test_model_relay_contract_uses_job_workspace_and_checks_result(
     else:
         with pytest.raises(ContentError, match="did not complete successfully"):
             await operation
+
+
+async def test_agent_overview_uses_effective_grants_and_preserves_revoked_history(service):
+    await service.create('owner', 'starter', 'Starter')
+    await service.share('owner', 'starter', 'person', 'contribute')
+    agent = await service.add_workload_agent('owner', 'Old name', 'helper', 'person')
+    await service.share('owner', 'starter', agent['id'], 'contribute')
+    result = (await service.agents('person'))[0]
+    assert result['wikis'] == [{'slug': 'starter', 'title': 'Starter', 'role': 'contribute'}]
+    assert result['credential_type'] == 'workload'
+    await service.update_agent('person', agent['id'], 'Archive helper', 'Reads retained sources')
+    with pytest.raises(Denied):
+        await service.update_agent('owner', agent['id'], 'Not mine', '')
+    await service.share('owner', 'starter', 'person', 'read')
+    assert (await service.agents('person'))[0]['wikis'][0]['role'] == 'read'
+    service.state.set_grant('starter', agent['id'], 'contribute')  # pending is not effective
+    assert (await service.agents('person'))[0]['wikis'] == []
+    service.state.projected('starter', agent['id'])
+    service.state.set_user_status('person', True)
+    assert (await service.agents('owner')) == []  # only own registrations
+    with pytest.raises(Denied):
+        await service.agents('person')
+    service.state.set_user_status('person', False)
+    service.state.user_projected('person')
+    await service.revoke_agent('person', agent['id'])
+    result = (await service.agents('person'))[0]
+    assert result['revoked'] and result['name'] == 'Archive helper' and result['wikis'] == []
+    assert result['purpose'] == 'Reads retained sources'
+
+
+async def test_authenticated_client_is_retained_in_ingest_job_and_commit(service):
+    await service.create('owner', 'starter', 'Starter')
+    job = await service.ingest('owner', 'starter', 'workshop.txt', encoded('Workshop source'),
+                               submission_id='app-request', client_id='wiki-example-app')
+    finished = await complete(service, job)
+    assert finished['status'] == 'completed', finished
+    assert finished['client_id'] == 'wiki-example-app'
+    repo = service.git.sync(service.state.wiki('starter'))
+    message = service.git.run(repo, 'show', '-s', '--format=%B', finished['revision']).decode()
+    assert '\nPrincipal: owner\n' in message and '\nClient: wiki-example-app\n' in message
+    replay = await service.ingest('owner', 'starter', 'workshop.txt', encoded('Workshop source'),
+                                  submission_id='app-request', client_id='another-app')
+    assert replay['client_id'] == 'wiki-example-app'
+    with pytest.raises(ContentError):
+        await service.ingest('owner', 'starter', 'workshop.txt', encoded('source'), client_id='app\nPrincipal: forged')

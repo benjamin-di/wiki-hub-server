@@ -21,6 +21,7 @@ class Settings:
     web_client_id: str = ""
     web_client_secret: str = field(default="", repr=False)
     web_session_key: str = field(default="", repr=False)
+    authorized_apps_url: str = ""
     # Optional compatible directory adapter; keep provider admin keys outside the application.
     directory_url: str = ""
     directory_api_key: str = field(default="", repr=False)
@@ -70,6 +71,7 @@ class Settings:
             web_client_id=os.environ.get("WIKI_WEB_CLIENT_ID", ""),
             web_client_secret=os.environ.get("WIKI_WEB_CLIENT_SECRET", ""),
             web_session_key=os.environ.get("WIKI_WEB_SESSION_KEY", ""),
+            authorized_apps_url=os.environ.get("WIKI_AUTHORIZED_APPS_URL", ""),
             directory_url=os.environ.get("WIKI_DIRECTORY_URL", "").rstrip("/"),
             directory_api_key=os.environ.get("WIKI_DIRECTORY_API_KEY", ""),
             owner_subject=os.environ.get("WIKI_OWNER_SUBJECT", ""),

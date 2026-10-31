@@ -20,6 +20,7 @@ from pathlib import Path
 
 import httpx
 
+from .auth import GatewayAccessToken, principal_subject, valid_client_id
 from .drive import PARK_SECONDS, Drive, DriveError, DriveUnavailable, blob_oid, device_account, remove_tree
 from .extraction import extract_text
 from .forgejo import Forgejo, ForgejoError
@@ -488,8 +489,10 @@ class Service:
     async def add_workload_agent(self, subject, name, client_id, owner=None):
         self.require_agent_registration(subject, name)
         if (not isinstance(client_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}", client_id)
-                or client_id == self.settings.oidc_client_id or not self.settings.oidc_issuer):
+                or not self.settings.oidc_issuer):
             raise ContentError("Use the exact configured Pocket ID workload client ID.")
+        if client_id in (self.settings.oidc_client_id, self.settings.web_client_id):
+            raise ContentError("Human sign-in clients cannot be registered as agent workloads.")
         owner = subject if owner is None else owner
         if not isinstance(owner, str) or not owner or owner.startswith("agent:"):
             raise ContentError("Use an active person's identity subject as the agent owner.")
@@ -504,7 +507,53 @@ class Service:
 
     async def agents(self, subject):
         self.require_active(subject)
-        return self.state.agents(subject)
+        agents = self.state.agents(subject)
+        for agent in agents:
+            agent["credential_type"] = "workload" if "workload" in agent else "agent_key"
+            agent["wikis"] = []
+            if agent["revoked"]:
+                continue
+            for wiki in self.state.list_wikis(agent["id"]):
+                try:
+                    self.allowed(agent["id"], wiki["slug"])
+                except Denied:
+                    continue
+                role = "read"
+                try:
+                    self.allowed(agent["id"], wiki["slug"], "contribute")
+                    role = "contribute"
+                except Denied:
+                    pass
+                agent["wikis"].append({"slug": wiki["slug"], "title": wiki["title"], "role": role})
+        return agents
+
+    async def update_agent(self, subject, identifier, name, purpose=""):
+        self.require_active(subject)
+        if (not isinstance(name, str) or not 1 <= len(name.strip()) <= 120
+                or any(ord(c) < 32 or ord(c) == 127 for c in name)):
+            raise ContentError("Give the service a name of 1–120 characters on one line.")
+        if (not isinstance(purpose, str) or len(purpose) > 500
+                or any(ord(c) < 32 or ord(c) == 127 for c in purpose)):
+            raise ContentError("Describe the service's purpose in at most 500 characters on one line.")
+        if not self.state.update_agent(subject, identifier, name.strip(), purpose.strip()):
+            raise Denied("No access to this agent.")
+        return self.state.agent(identifier)
+
+    def observe_access(self, access):
+        subject = principal_subject(access)
+        self.require_active(subject)
+        if subject.startswith("agent:"):
+            agent = self.state.agent(subject)
+            if agent is None or agent["revoked"]:
+                raise Denied("This agent has been revoked.")
+        if valid_client_id(access.client_id):
+            self.state.observe_actor(subject, access.client_id,
+                                     "gateway" if isinstance(access, GatewayAccessToken) else "oauth")
+        return subject
+
+    async def apps(self, subject):
+        self.require_active(subject)
+        return self.state.observed_apps(subject)
 
     async def revoke_agent(self, subject, identifier):
         self.require_active(subject)
@@ -729,7 +778,9 @@ class Service:
                 "text": text[:100_000], "truncated": len(text) > 100_000}
 
     async def ingest(self, subject, wiki, filename, content_base64, instructions="",
-                     submission_id=None, attachments=None):
+                     submission_id=None, attachments=None, *, client_id=None):
+        if client_id is not None and not valid_client_id(client_id):
+            raise ContentError("The authenticated client ID is invalid.")
         if self.closing:
             raise ContentError("The server is stopping. Retry this source after it is available again.")
         self.allowed(subject, wiki, "contribute")
@@ -779,7 +830,8 @@ class Service:
                 part = source_dir / name
                 part.write_bytes(value)
                 part.chmod(0o600)
-            self.state.add_job(job_id, wiki, subject, filename, str(source), instructions, submission_id, fingerprint)
+            self.state.add_job(job_id, wiki, subject, filename, str(source), instructions, submission_id, fingerprint,
+                               client_id=client_id)
             task = asyncio.create_task(self.process(job_id))
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
@@ -913,6 +965,7 @@ class Service:
                             job["subject"],
                             job_id,
                             self.publication_prepared(job_id),
+                            **({"client_id": job["client_id"]} if job["client_id"] else {}),
                         )
                     )
                     try:

@@ -14,6 +14,15 @@ from fastmcp.utilities.auth import decode_jwt_header
 WIKI_SCOPE = "wiki:access"
 
 
+def valid_client_id(value):
+    return (isinstance(value, str) and 0 < len(value) <= 512 and value == value.strip()
+            and value.isprintable() and "," not in value)
+
+
+class GatewayAccessToken(AccessToken):
+    """The client is asserted by the authenticated gateway, not a public header."""
+
+
 class GatewayVerifier(TokenVerifier):
     """Trust one explicitly configured gateway, only on its separate MCP transport.
 
@@ -41,8 +50,11 @@ class GatewayVerifier(TokenVerifier):
                 or not subject.isprintable() or "," in subject
                 or subject.startswith(("agent:", "client-"))):
             return None
-        return AccessToken(token=token, client_id="trusted-gateway", subject=subject,
-                           scopes=[WIKI_SCOPE], claims={"sub": subject})
+        clients = get_http_request().headers.getlist("x-wiki-client")
+        if len(clients) > 1 or (clients and not valid_client_id(clients[0])):
+            return None
+        return GatewayAccessToken(token=token, client_id=clients[0] if clients else "trusted-gateway",
+                                  subject=subject, scopes=[WIKI_SCOPE], claims={"sub": subject})
 
 
 class WorkloadAccessToken(AccessToken):

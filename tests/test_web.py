@@ -99,6 +99,7 @@ def browser_app(settings, service):
     settings = replace(settings, web_client_id="wiki-web", web_client_secret="synthetic-web-client-secret",
                        web_session_key="synthetic-session-key-32-characters-minimum",
                        directory_url="https://id.example.test", directory_api_key="synthetic-directory-key")
+    service.settings = settings
     identity = FakeIdentity(settings)
     verifier = create_verifier(settings)
     verifier._fetch_jwks = AsyncMock(return_value={"keys": [identity.key.as_dict(private=False)]})
@@ -212,6 +213,57 @@ def test_session_refresh_rotation_logout_and_csrf(browser_app):
         assert client.post("/auth/logout", json={}).status_code == 403
         assert client.post("/auth/logout", headers=csrf_headers(client, app), json={}).status_code == 200
         assert web.cookie not in client.cookies and "Sign in with" in client.get("/").text
+
+
+@pytest.mark.parametrize(("error", "status"), [
+    ("temporarily_unavailable", 503), ("server_error", 500),
+    ("temporarily_unavailable", 400), ("server_error", 400),
+])
+def test_temporary_provider_refresh_failure_retains_browser_session(browser_app, error, status):
+    app, identity = browser_app
+    web = app.state.web
+    with TestClient(app, base_url=identity.settings.public_url) as client:
+        sign_in(client, app, identity)
+        identifier = client.cookies[web.cookie]
+        session = web.store.session(identifier, identity.settings.oidc_issuer)
+        session["token"]["expires_at"] = time.time() - 1
+        web.store.update_session(identifier, session["token"], session["csrf"])
+
+        def unavailable(request):
+            if request.url.path == "/token":
+                return httpx.Response(status, json={"error": error, "error_description": "synthetic-private-detail"})
+            return identity.handle(request)
+
+        web.identity.transport = httpx.MockTransport(unavailable)
+        response = client.get("/ui/api/session")
+        assert response.status_code == 503
+        assert "synthetic-private-detail" not in response.text
+        retained = web.store.session(identifier, identity.settings.oidc_issuer)
+        assert retained["token"] == session["token"] and retained["csrf"] == session["csrf"]
+
+        web.identity.transport = httpx.MockTransport(identity.handle)
+        assert client.get("/ui/api/session").status_code == 200
+        assert client.cookies[web.cookie] == identifier
+
+
+def test_revoked_provider_refresh_grant_ends_browser_session(browser_app):
+    app, identity = browser_app
+    web = app.state.web
+    with TestClient(app, base_url=identity.settings.public_url) as client:
+        sign_in(client, app, identity)
+        identifier = client.cookies[web.cookie]
+        session = web.store.session(identifier, identity.settings.oidc_issuer)
+        session["token"]["expires_at"] = time.time() - 1
+        web.store.update_session(identifier, session["token"], session["csrf"])
+
+        def revoked(request):
+            if request.url.path == "/token":
+                return httpx.Response(400, json={"error": "invalid_grant"})
+            return identity.handle(request)
+
+        web.identity.transport = httpx.MockTransport(revoked)
+        assert client.get("/ui/api/session").status_code == 401
+        assert web.store.session(identifier, identity.settings.oidc_issuer) is None
 
 
 def test_web_create_share_change_remove_and_activity(browser_app):
@@ -556,3 +608,111 @@ def test_explicit_profile_refresh_preserves_grants_and_directory_failure(browser
         assert response.status_code == 202 and response.json()["unavailable"] == 2
         assert "Sam Updated" in client.get("/wikis/starter/access").text
         assert change(client, app, "reader", "none").status_code == 200
+
+
+def test_administration_refresh_resolves_never_signed_in_people_without_changing_access(browser_app):
+    app, identity = browser_app
+    web, service = app.state.web, app.state.service
+    asyncio.run(service.create("owner", "starter", "Starter"))
+    asyncio.run(service.share("owner", "starter", "reader", "read"))
+    # Labels remain useful for disabled people: refresh is not admission or a new grant.
+    identity.users["reader"]["disabled"] = True
+    with TestClient(app, base_url=identity.settings.public_url) as client:
+        sign_in(client, app, identity)
+        assert web.store.profile(identity.settings.oidc_issuer, "reader")["name"] == "Unknown person"
+        assert 'id="refresh-account-names"' in client.get("/administration").text
+        grants = service.state.grants("starter")
+        status = service.state.user_status("reader")
+        copies = service.state.copy_setting("user", "reader")
+        denied = client.post("/ui/api/accounts/profiles", json={})
+        assert denied.status_code == 403 and not identity.directory_calls
+        result = client.post("/ui/api/accounts/profiles", headers=csrf_headers(client, app), json={})
+        assert result.status_code == 200 and result.json()["unavailable"] == 0
+        assert next(p for p in result.json()["people"] if p["subject"] == "reader")["name"] == "Sam Rivera"
+        assert service.state.grants("starter") == grants
+        assert service.state.user_status("reader") == status
+        assert service.state.copy_setting("user", "reader") == copies
+        assert "Sam Rivera" in client.get("/administration").text
+        identity.directory_down = True
+        result = client.post("/ui/api/accounts/profiles", headers=csrf_headers(client, app), json={})
+        assert result.status_code == 200 and result.json()["unavailable"] == 2
+        assert web.store.profile(identity.settings.oidc_issuer, "reader")["name"] == "Sam Rivera"
+        identity.directory_calls.clear()
+        sign_in(client, app, identity, subject="reader")
+        assert client.post("/ui/api/accounts/profiles", headers=csrf_headers(client, app), json={}).status_code == 403
+        assert not identity.directory_calls
+
+
+async def test_profile_refresh_rechecks_owner_after_waiting_and_bounds_parallel_lookups(browser_app, monkeypatch):
+    app, identity = browser_app
+    web = app.state.web
+    active = peak = 0
+    authorized = True
+
+    async def display(subject):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return {"subject": subject, "name": "Synthetic Person", "email": "", "username": ""}
+
+    def authorize():
+        from wiki_hub.service import Denied
+        if not authorized:
+            raise Denied("Current access lost")
+
+    monkeypatch.setattr(web.directory, "display", display)
+    assert await web.refresh_profiles([f"person-{n}" for n in range(9)] + ["agent:skip", "client-skip"], authorize) == 0
+    assert peak == 4
+    authorized = False
+    from wiki_hub.service import Denied
+    with pytest.raises(Denied):
+        await web.refresh_profiles(["late-person"], authorize)
+    assert web.store.profile(identity.settings.oidc_issuer, "late-person")["name"] == "Unknown person"
+
+
+@pytest.mark.parametrize("setting", ["web_client_id", "oidc_client_id"])
+def test_human_client_cannot_be_registered_as_a_workload(browser_app, setting):
+    app, identity = browser_app
+    with TestClient(app, base_url=identity.settings.public_url) as client:
+        assert sign_in(client, app, identity).status_code == 303
+        response = client.post("/ui/api/agents", headers=csrf_headers(client, app), json={
+            "name": "Mistaken human client", "client_id": getattr(identity.settings, setting),
+        })
+        current = client.get("/ui/api/agents")
+        assert (response.status_code, current.status_code) == (400, 200)
+        assert "Human sign-in clients" in response.json()["error"]
+        assert app.state.service.state.agents("owner") == []
+        # Rejected registration must leave both the existing browser and a new
+        # sign-in usable; revoked workload bindings are intentionally retained.
+        assert client.get("/ui/api/agents").status_code == 200
+        assert sign_in(client, app, identity).status_code == 303
+
+
+def test_access_overview_and_service_details_are_scoped_and_escape_html(browser_app):
+    app, identity = browser_app
+    service = app.state.service
+    asyncio.run(service.create('owner', 'starter', 'Starter'))
+    agent = asyncio.run(service.add_agent('owner', 'Source helper'))
+    asyncio.run(service.share('owner', 'starter', agent['id'], 'contribute'))
+    revoked = asyncio.run(service.add_agent('owner', 'Old helper'))
+    asyncio.run(service.revoke_agent('owner', revoked['id']))
+    with TestClient(app, base_url=identity.settings.public_url) as client:
+        sign_in(client, app, identity)
+        page = client.get('/agents')
+        assert 'Services acting for you' in page.text and 'Apps signed in as you' in page.text
+        assert 'Contributor' in page.text and 'No wiki access' not in page.text
+        assert 'Revoked services (1)' in page.text and 'Not observed yet' in page.text
+        assert identity.settings.web_client_id in page.text
+        endpoint = '/ui/api/agents/' + agent['id']
+        assert client.post(endpoint, json={'name': 'Changed'}).status_code == 403
+        response = client.post(endpoint, headers=csrf_headers(client, app), json={
+            'name': '<script>name</script>', 'purpose': '<script>purpose</script>'})
+        assert response.status_code == 200
+        page = client.get('/agents')
+        assert '<script>purpose</script>' not in page.text and '&lt;script&gt;purpose' in page.text
+        assert service.state.role(agent['id'], 'starter') == 'contribute'
+        sign_in(client, app, identity, subject='reader')
+        assert 'Source helper' not in client.get('/agents').text
+        assert client.post(endpoint, headers=csrf_headers(client, app), json={'name': 'Stolen'}).status_code == 403

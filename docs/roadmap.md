@@ -1,6 +1,6 @@
 # Roadmap and remaining work
 
-Audited 30 October 2026. This is the reusable product roadmap. Deployment
+Reassessed 31 October 2026. This is the reusable product roadmap. Deployment
 inventories, account bindings, legacy imports and acceptance receipts belong
 in private operations records. Source implementation, release publication and
 acceptance on an installation are separate milestones.
@@ -30,8 +30,19 @@ screens or transports.
 |---|---|---|
 | 1 | Finish the correctness release | Confirmed retention, filename and revocation defects are fixed; the installed release preserves sources, unpublished edits and current restrictions |
 | 2 | Recover email delivery after downtime | The consuming application retains exact source bytes, instructions and the submission ID before sending; bounded recovery uses that ID and exposes the eventual job/outcome without asking for another email |
-| 3 | Demonstrate knowledge quality and recovery | Run the existing thirty cases plus representative email/PDF/OCR inputs through the configured worker and consumer; inspect pages, answers and citations, measure the intended operating size and complete a populated restore |
-| 4 | Ship focused browser permissions | A person can find a wiki, share/change/revoke access and understand pending or uncertain changes; secure sessions, current authorization and accessible interaction are release requirements |
+| 3 | Demonstrate the agent workflow | Check 10–15 everyday questions through one actual consumer; record consultation, first-attempt retrieval, supported answers, citations and elapsed time. Reuse version-scoped ingestion and populated-restore receipts; qualify missing evidence before expanding |
+| 4 | Accept focused browser permissions | Qualify the implemented controls: a person can find a wiki, share/change/revoke access and understand pending or uncertain changes; secure sessions, current authorization and accessible interaction are release requirements |
+
+Use the [everyday agent check](../examples/agent-acceptance.md) for a small
+read-only pilot. The existing [thirty-case workflow](../examples/acceptance.md)
+remains the ingestion/PDF/OCR qualification. A scripted MCP check proves transport
+and retrieval behavior, not that a hosted agent chooses to consult it. Retain
+those results separately and fix concrete failures before adding features.
+
+Reuse a verified populated restore when its source, schema and recovery scope
+still apply. Check that the recorded snapshot remains retained and identify any
+unverified changes; do not repeat a disruptive cold capture or full cloud read
+merely to refresh a roadmap checkbox. Rehearse schema changes on copied state.
 
 Delivery recovery belongs in the existing consumer and its scheduler. Before a
 job is observed, replay only unchanged input with the same ID. Once a job is
@@ -158,7 +169,7 @@ release or installation claim.
 | Drive recovery and diagnostics | Implementation is complete; qualify recovery of unpublished edits and base metadata, per-page quiet periods and caller-owned diagnostics on the installed release |
 | Optional writable inbox | Deferred until a named need is unmet by email/API intake. Consent, storage bounds and recovery must precede exposure; provisioning folders alone is insufficient |
 | Email delivery recovery | Qualify the consuming application through temporary downtime and restart, lost acknowledgement, accepted-job observation and paused recovery; no whole-agent or failed-model retry |
-| Knowledge quality and operating size | Run the existing 30-case specification through the configured worker and consumer; record retrieval, attribution, OCR accuracy and resource/latency measurements |
+| Agent usefulness and operating size | Run the small everyday check on the actual consumer; keep its consultation/answer results separate from transport tests. Reuse applicable 30-case ingestion evidence and record the intended collection size and observed latency; qualify unmeasured resource limits separately |
 | Installed clients | Accept each actual Windows, second-person and hosted-client flow, including conflicts, sleep/resume and connected revocation. Source tests do not establish device adoption |
 | Delivery and recovery | Track each source release, public export and running image separately; confirm installed client identities and rehearse a populated restore including unpublished drive edits and current restrictions |
 

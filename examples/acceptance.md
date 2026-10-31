@@ -4,6 +4,8 @@ Submit `starter.txt`, wait for its job and inspect these answers with their sour
 Run these baseline questions before adding the updates below. This is a manual
 synthetic acceptance specification, not an implemented benchmark or a measured
 result. Record the tested release, worker/model settings, consumer and revision.
+For a read-only check of an existing collection through an agent, use the smaller
+[everyday agent acceptance](agent-acceptance.md) instead of repeating ingestion.
 
 | Question | Expected source-supported answer |
 |---|---|

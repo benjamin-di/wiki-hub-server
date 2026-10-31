@@ -416,3 +416,42 @@ async def test_authenticated_client_is_retained_in_ingest_job_and_commit(service
     assert replay['client_id'] == 'wiki-example-app'
     with pytest.raises(ContentError):
         await service.ingest('owner', 'starter', 'workshop.txt', encoded('source'), client_id='app\nPrincipal: forged')
+
+
+async def test_new_wiki_has_clean_seed_purpose_and_no_inherited_access(service):
+    await service.create("owner", "handbook", "Team handbook", "Keep workshop plans")
+    pages = await service.pages("owner", "handbook")
+    assert pages["pages"] == ["wiki/index.md"] and not pages["has_sources"]
+    index = await service.read_page("owner", "handbook", "wiki/index.md")
+    assert "Keep workshop plans" in index["content"]
+    assert "09:30" not in index["content"] and "community-workshop" not in index["content"]
+    assert service.state.grants("handbook") == []
+    assert await service.list_wikis("reader") == []
+    revision = pages["revision"]
+    # Existing API creation remains idempotent and does not rewrite any accepted seed.
+    await service.create("owner", "handbook", "Changed title", "Changed purpose")
+    assert (await service.pages("owner", "handbook"))["revision"] == revision
+    from wiki_hub.state import AccessConflict
+    with pytest.raises(AccessConflict, match="short name"):
+        await service.create("owner", "handbook", "New wiki", new=True)
+    with pytest.raises(ContentError, match="purpose"):
+        await service.create("owner", "oversize", "Oversize", "x" * 1001)
+    assert service.state.wiki("oversize") is None
+
+
+async def test_strict_creation_never_adopts_another_unfinished_wiki(service, monkeypatch):
+    from wiki_hub.state import AccessConflict
+    seed = service.git.seed
+    def refuse(*args):
+        raise GitError("Synthetic seed unavailable")
+    monkeypatch.setattr(service.git, "seed", refuse)
+    with pytest.raises(GitError):
+        await service.create("owner", "unfinished", "Original title", "Original purpose", new=True)
+    monkeypatch.setattr(service.git, "seed", seed)
+    with pytest.raises(AccessConflict):
+        await service.create("owner", "unfinished", "Different title", "Different purpose", new=True)
+    assert service.state.wiki("unfinished")["status"] == "initializing"
+    assert not service.git.repo("unfinished").exists()
+    await service.create("owner", "unfinished", "Original title", "Original purpose")
+    content = (await service.read_page("owner", "unfinished", "wiki/index.md"))["content"]
+    assert "Original title" in content and "Original purpose" in content and "Different" not in content

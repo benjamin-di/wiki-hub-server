@@ -17,6 +17,13 @@
 {% else %}<section class="empty"><h2>Your first shared wiki starts here.</h2><p class="muted">When someone grants you access, that wiki will appear here.</p>{% if instance_owner %}<p>Choose <strong>Create wiki</strong> to start a collection.</p>{% else %}<p class="help">Ask a wiki manager to add you using your name or account email.</p>{% endif %}</section>{% endif %}
 <details class="account-details"><summary>Your account details</summary><p class="help">For support with your Wiki Hub access.</p><dl><dt>Name</dt><dd>{{ person.name }}</dd><dt>Account subject</dt><dd><code>{{ person.subject }}</code></dd></dl></details>
 {% if instance_owner %}
-<dialog id="create-dialog" aria-labelledby="create-title"><form id="create-form"><div class="dialog-top"><h2 id="create-title">Create a wiki</h2><button type="button" class="button subtle close-dialog" aria-label="Close create wiki dialog">✕</button></div><label for="wiki-title">Wiki title</label><input id="wiki-title" required maxlength="200" placeholder="Team handbook"><label for="wiki-slug">Short name</label><input id="wiki-slug" required maxlength="63" pattern="[a-z][a-z0-9\-]*" placeholder="team-handbook"><p class="help">Used in links and connections. Start with a lowercase letter, then use letters, numbers and hyphens.</p><div id="create-error" class="status" role="alert"></div><div class="dialog-actions"><button type="button" class="button close-dialog">Cancel</button><button class="button primary" type="submit">Create wiki</button></div></form></dialog>
+<dialog id="create-dialog" aria-labelledby="create-title"><form id="create-form">
+  <div class="dialog-top"><h2 id="create-title">Create a wiki</h2><button type="button" class="button subtle close-dialog" aria-label="Close create wiki dialog">✕</button></div>
+  <p class="muted">Start with a clean collection. Only you have access until you share it.</p>
+  <label for="wiki-title">Wiki title</label><input id="wiki-title" required maxlength="200" placeholder="Team handbook" autofocus>
+  <label for="wiki-purpose">Purpose <span class="muted">(optional)</span></label><textarea id="wiki-purpose" maxlength="1000" rows="3" placeholder="What would you like to keep here?"></textarea>
+  <details id="create-advanced"><summary>Advanced</summary><label for="wiki-slug">Short name</label><input id="wiki-slug" required maxlength="63" pattern="[a-z][a-z0-9\-]*" placeholder="team-handbook"><p class="help">Generated from the title. Used in links and connections; it cannot be changed later.</p></details>
+  <div id="create-error" class="status" role="alert"></div><div class="dialog-actions"><button type="button" class="button close-dialog">Cancel</button><button class="button primary" type="submit">Create wiki</button></div>
+</form></dialog>
 {% endif %}
 {% endblock %}

@@ -1,5 +1,6 @@
 import subprocess
 from dataclasses import replace
+from urllib.parse import quote
 
 import pytest
 
@@ -51,9 +52,9 @@ def settings(tmp_path):
 @pytest.fixture
 def service(settings, tmp_path):
     async def runner(work, _job, raw, reference):
-        source = (work / reference).read_text()
+        source = (work / reference).read_text().replace(f"Source: {raw}\n", f"Source: `{raw}`\n")
         (work / "wiki/workshop.md").write_text(
-            f"# Workshop\n\nThe workshop opens at 09:30.\n\nSource: [{raw}](../{raw})\n\n"
+            f"# Workshop\n\nThe workshop opens at 09:30.\n\nSource: [{raw}](../{quote(raw)})\n\n"
             f"Extracted reference: [{reference}](../{reference})\n\n{source}"
         )
         (work / "wiki/index.md").write_text("# Starter\n\n[Workshop](workshop.md)\n")

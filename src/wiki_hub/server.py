@@ -195,7 +195,8 @@ def create_app(settings=None, service=None, verifier=None, *, web_transport=None
                     return JSONResponse(await service.list_wikis(caller, include_archived=include == "true"))
                 if request.method == "POST":
                     data = await body(request)
-                    return JSONResponse(await service.create(caller, data["slug"], data["title"]), status_code=201)
+                    result = await service.create(caller, data["slug"], data["title"], data.get("purpose", ""))
+                    return JSONResponse(result, status_code=201)
             if path == ["search"] and request.method == "GET":
                 return JSONResponse(await service.search(
                     caller, None, request.query_params["q"], int(request.query_params.get("limit", "10")),

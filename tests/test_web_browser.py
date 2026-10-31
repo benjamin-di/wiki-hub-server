@@ -663,3 +663,249 @@ def test_browser_share_confirmation_waits_for_current_snapshot(running_web, snap
         expect(member).to_have_count(0)
         assert not service.state.grants('starter')
         browser.close()
+
+
+def test_browser_create_first_source_recovery_and_private_mobile(running_web):
+    app, identity, public = running_web
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        context = browser.new_context(viewport={"width": 390, "height": 844})
+        page = context.new_page()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        browser_sign_in(page, identity, public)
+        page.get_by_role("button", name="Create wiki").click()
+        expect(page.get_by_label("Wiki title")).to_be_focused()
+        page.get_by_label("Wiki title").fill("Café plans")
+        page.get_by_label("Purpose").fill("Keep our workshop plans together")
+        expect(page.locator("#wiki-slug")).to_have_value("cafe-plans")
+        expect(page.locator("#create-advanced")).not_to_have_attribute("open", "")
+        page.get_by_role("button", name="Create wiki", exact=True).click()
+        expect(page).to_have_url(public + "/wikis/cafe-plans")
+        expect(page.get_by_role("heading", name="Add your first source")).to_be_visible()
+        expect(page.get_by_text("Only you have access", exact=True)).to_be_visible()
+        assert app.state.service.state.grants("cafe-plans") == []
+        page.get_by_label("Paste text", exact=True).check()
+        page.get_by_label("Source name").fill("Planning note")
+        text = "Café workshop doors open at 09:30.\nBring a notebook.\n"
+        page.get_by_label("Text", exact=True).fill(text)
+        lost = False
+        def lose_reply(route):
+            nonlocal lost
+            if route.request.method == "POST" and not lost:
+                route.fetch()
+                lost = True
+                route.abort()
+            else:
+                route.continue_()
+        page.route(public + "/ui/api/wikis/cafe-plans/sources", lose_reply)
+        page.get_by_role("button", name="Add source", exact=True).click()
+        expect(page.locator("#source-message")).to_contain_text("could not be confirmed")
+        expect(page.get_by_label("Text", exact=True)).to_have_value(text)
+        edited = text + "New unsent idea: bring a camera."
+        page.get_by_label("Text", exact=True).fill(edited)
+        page.get_by_role("button", name="Check submission").click()
+        expect(page.locator("#source-message")).to_contain_text("unsent source is still here")
+        expect(page.get_by_label("Text", exact=True)).to_have_value(edited)
+        expect(page.locator("#source-jobs")).to_contain_text("Saved automatically", timeout=15000)
+        assert len(app.state.service.state.jobs("cafe-plans")) == 1
+        job = app.state.service.state.jobs("cafe-plans")[0]
+        original = app.state.service.git.original(app.state.service.state.wiki("cafe-plans"),
+                                                 f"raw/{job['id']}-Planning note.txt").read_bytes()
+        assert original.decode() == text
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        page.screenshot(path=".artifacts/first-source-mobile.png", full_page=True)
+        assert not errors
+        browser.close()
+
+
+def test_browser_create_collision_advanced_unicode_and_file_upload(running_web):
+    app, identity, public = running_web
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        browser_sign_in(page, identity, public)
+        page.get_by_role("button", name="Create wiki").click()
+        page.get_by_label("Wiki title").fill("Starter")
+        page.get_by_role("button", name="Create wiki", exact=True).click()
+        expect(page.locator("#create-error")).to_contain_text("already in use")
+        expect(page.get_by_label("Short name")).to_be_focused()
+        page.get_by_label("Short name").fill("custom-notes")
+        page.get_by_label("Wiki title").fill("旅行")
+        expect(page.get_by_label("Short name")).to_have_value("custom-notes")
+        page.get_by_role("button", name="Create wiki", exact=True).click()
+        expect(page).to_have_url(public + "/wikis/custom-notes")
+        page.get_by_label("File", exact=True).set_input_files({
+            "name": "file-note.txt", "mimeType": "text/plain", "buffer": b"Workshop file source"})
+        page.get_by_role("button", name="Add source", exact=True).click()
+        expect(page.locator("#source-jobs")).to_contain_text("Saved automatically", timeout=15000)
+        assert len(app.state.service.state.jobs("custom-notes")) == 1
+        browser.close()
+
+
+def test_browser_source_failed_job_never_retries_and_connected_demotion_hides_form(running_web):
+    app, identity, public = running_web
+    service = app.state.service
+    async def fail(*args):
+        raise RuntimeError("Synthetic model unavailable")
+    service.runner = fail
+    asyncio.run(service.share("owner", "starter", "reader", "contribute"))
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        browser_sign_in(page, identity, public, "reader")
+        page.get_by_role("link", name="Team handbook", exact=True).click()
+        page.get_by_label("File", exact=True).set_input_files({
+            "name": "failed-note.txt", "mimeType": "text/plain", "buffer": b"Workshop source"})
+        page.get_by_role("button", name="Add source", exact=True).click()
+        expect(page.locator("#source-jobs")).to_contain_text("Needs review · failed", timeout=15000)
+        page.get_by_role("button", name="Refresh status").click()
+        expect(page.locator("#source-jobs")).to_contain_text("not be retried automatically")
+        assert len(service.state.jobs("starter")) == 1
+        identity.subject = "owner"
+        owner_headers = {"Authorization": "Bearer " + identity.tokens()["access_token"]}
+        response = httpx2.post(public + "/api/wikis/starter/share", json={"subject": "reader", "role": "read"},
+                               headers=owner_headers)
+        assert response.status_code == 200
+        identity.subject = "reader"
+        page.get_by_role("button", name="Refresh status").click()
+        expect(page.locator("#source-form")).not_to_be_visible()
+        response = httpx2.post(public + "/api/wikis/starter/unshare", json={"subject": "reader"},
+                               headers=owner_headers)
+        assert response.status_code == 200
+        page.evaluate("window.dispatchEvent(new Event('focus'))")
+        expect(page.get_by_role("heading", name="Access unavailable")).to_be_visible()
+        browser.close()
+
+
+def test_browser_reload_after_unreceived_source_retries_same_identity(running_web):
+    app, identity, public = running_web
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        browser_sign_in(page, identity, public)
+        page.get_by_role("link", name="Team handbook", exact=True).click()
+        page.get_by_label("Paste text", exact=True).check()
+        page.get_by_label("Source name").fill("Retry note")
+        page.get_by_label("Text", exact=True).fill("Workshop source to retain")
+        def refuse(route):
+            if route.request.method == "POST":
+                route.abort()  # The server never received this source.
+            else:
+                route.continue_()
+        page.route(public + "/ui/api/wikis/starter/sources", refuse)
+        page.get_by_role("button", name="Add source", exact=True).click()
+        expect(page.locator("#source-message")).to_contain_text("could not be confirmed")
+        page.unroute(public + "/ui/api/wikis/starter/sources", refuse)
+        checks = []
+        def hold_check(route):
+            checks.append(route)
+        page.route(public + "/ui/api/wikis/starter/submission?*", hold_check)
+        page.reload()
+        expect(page.get_by_role("button", name="Add source", exact=True)).to_be_disabled()
+        expect(page.get_by_label("File", exact=True)).to_be_disabled()
+        expect(page.get_by_role("button", name="Add a different source")).to_be_disabled()
+        assert checks
+        checks[0].continue_()
+        page.unroute(public + "/ui/api/wikis/starter/submission?*", hold_check)
+        expect(page.locator("#source-message")).to_contain_text("No saved submission found")
+        page.get_by_label("Paste text", exact=True).check()
+        page.get_by_label("Source name").fill("Retry note")
+        page.get_by_label("Text", exact=True).fill("Different source")
+        page.get_by_role("button", name="Add source", exact=True).click()
+        expect(page.locator("#source-message")).to_contain_text("retry with the same name and source")
+        page.get_by_label("Text", exact=True).fill("Workshop source to retain")
+        page.get_by_role("button", name="Add source", exact=True).click()
+        expect(page.locator("#source-jobs")).to_contain_text("Saved automatically", timeout=15000)
+        assert len(app.state.service.state.jobs("starter")) == 1
+        browser.close()
+
+
+@pytest.mark.parametrize("original_kind", ["file", "text"])
+def test_browser_confirmed_source_preserves_and_reveals_other_mode_draft(running_web, original_kind):
+    app, identity, public = running_web
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        browser_sign_in(page, identity, public)
+        page.get_by_role("link", name="Team handbook", exact=True).click()
+        if original_kind == "text":
+            page.get_by_label("Paste text", exact=True).check()
+            page.get_by_label("Source name").fill("Original note")
+            page.get_by_label("Text", exact=True).fill("Original workshop source")
+        else:
+            page.get_by_label("File", exact=True).set_input_files({
+                "name": "original.txt", "mimeType": "text/plain", "buffer": b"Original workshop source"})
+        lost = False
+        def lose_reply(route):
+            nonlocal lost
+            if route.request.method == "POST" and not lost:
+                route.fetch()
+                lost = True
+                route.abort()
+            else:
+                route.continue_()
+        page.route(public + "/ui/api/wikis/starter/sources", lose_reply)
+        page.get_by_role("button", name="Add source", exact=True).click()
+        expect(page.locator("#source-message")).to_contain_text("could not be confirmed")
+        if original_kind == "file":
+            page.get_by_label("Paste text", exact=True).check()
+            page.get_by_label("Source name").fill("Unsent note")
+            page.get_by_label("Text", exact=True).fill("Keep this unsent draft")
+            page.get_by_label("Upload a file", exact=True).check()
+        else:
+            page.get_by_label("Upload a file", exact=True).check()
+            page.get_by_label("File", exact=True).set_input_files({
+                "name": "unsent.txt", "mimeType": "text/plain", "buffer": b"Keep this unsent file"})
+            page.get_by_label("Paste text", exact=True).check()
+        page.get_by_role("button", name="Check submission").click()
+        expect(page.locator("#source-message")).to_contain_text("unsent source is still here")
+        if original_kind == "file":
+            expect(page.get_by_label("Paste text", exact=True)).to_be_checked()
+            expect(page.get_by_label("Source name")).to_have_value("Unsent note")
+            expect(page.get_by_label("Text", exact=True)).to_have_value("Keep this unsent draft")
+            assert page.get_by_label("File", exact=True).input_value() == ""
+        else:
+            expect(page.get_by_label("Upload a file", exact=True)).to_be_checked()
+            assert page.get_by_label("File", exact=True).input_value().endswith("unsent.txt")
+            assert page.get_by_label("Source name").input_value() == ""
+            assert page.get_by_label("Text", exact=True).input_value() == ""
+        assert len(app.state.service.state.jobs("starter")) == 1
+        browser.close()
+
+
+def test_browser_denied_retry_retains_an_earlier_unconfirmed_submission(running_web):
+    app, identity, public = running_web
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        browser_sign_in(page, identity, public)
+        page.get_by_role("link", name="Team handbook", exact=True).click()
+        page.get_by_label("File", exact=True).set_input_files({
+            "name": "archive-retry.txt", "mimeType": "text/plain", "buffer": b"Original workshop source"})
+        submissions = []
+        def lose_first_reply(route):
+            if route.request.method == "POST":
+                submissions.append(route.request.post_data_json["submission_id"])
+                if len(submissions) == 1:
+                    route.fetch()
+                    route.abort()
+                    return
+            route.continue_()
+        page.route(public + "/ui/api/wikis/starter/sources", lose_first_reply)
+        page.get_by_role("button", name="Add source", exact=True).click()
+        expect(page.locator("#source-message")).to_contain_text("could not be confirmed")
+        expect(page.locator("#source-jobs")).to_contain_text("Saved automatically", timeout=15000)
+        headers = {"Authorization": "Bearer " + identity.tokens()["access_token"]}
+        result = httpx2.post(public + "/api/wikis/starter/archive", json={"archived": True}, headers=headers)
+        assert result.status_code == 200
+        page.get_by_role("button", name="Add source", exact=True).click()
+        expect(page.locator("#source-message")).to_contain_text("earlier submission is still unconfirmed")
+        assert page.evaluate("sessionStorage.getItem('wiki-submission:owner:starter') !== null")
+        result = httpx2.post(public + "/api/wikis/starter/archive", json={"archived": False}, headers=headers)
+        assert result.status_code == 200
+        page.get_by_role("button", name="Add source", exact=True).click()
+        expect(page.locator("#source-message")).to_contain_text("Source received")
+        assert len(submissions) == 3 and len(set(submissions)) == 1
+        assert len(app.state.service.state.jobs("starter")) == 1
+        browser.close()

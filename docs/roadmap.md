@@ -1,77 +1,18 @@
-# Roadmap and remaining work
+# Product scope and qualification contracts
 
-Reassessed 31 October 2026. This is the reusable product roadmap. Deployment
-inventories, account bindings, legacy imports and acceptance receipts belong
-in private operations records. Source implementation, release publication and
-acceptance on an installation are separate milestones.
+Track current work in the owning repository's issues. This page defines supported
+behavior, design constraints, deliberate deferrals and repeatable qualification
+requirements. It is not a live release inventory, execution queue or installation
+acceptance record. Keep private receipts and person-specific adoption evidence in
+private operations records.
 
 ## Immediate scope for agent knowledge
 
-The core MCP retrieval features are implemented: discovery instructions,
-cross-wiki lexical search, stemming/phrases/exclusions, title weighting, heading
-snippets, wiki overviews, file maps, numbered range reads and path suggestions.
-The latest retrieval fixes preserve small relevance scores, ignore unsupported
-Git filenames, search filenames during fallback, refresh overviews after direct
-pushes and recheck access before returning search outcomes.
-
-No additional core retrieval feature is required for the immediate agent workflow.
-Built-in MCP consultation instructions and a reusable
-[host-instruction example](clients.md#help-agents-consult-the-wiki) already exist.
-The optional trusted-gateway transport is implemented with a separate backend
-credential and current per-wiki authorization; it does not replace direct OAuth
-or scoped agent access.
-
-The immediate product promise is to submit information once, preserve it
-faithfully, retrieve supported answers, enforce current access and recover
-failures without losing work. Prioritize completion of that workflow over new
-screens or transports.
-
-| Order | Work | Observable completion |
-|---|---|---|
-| 1 | Finish the correctness release | Confirmed retention, filename and revocation defects are fixed; the installed release preserves sources, unpublished edits and current restrictions |
-| 2 | Recover email delivery after downtime | The consuming application retains exact source bytes, instructions and the submission ID before sending; bounded recovery uses that ID and exposes the eventual job/outcome without asking for another email |
-| 3 | Demonstrate the agent workflow | Check 10–15 everyday questions through one actual consumer; record consultation, first-attempt retrieval, supported answers, citations and elapsed time. Reuse version-scoped ingestion and populated-restore receipts; qualify missing evidence before expanding |
-| 4 | Accept focused browser permissions | Qualify the implemented controls: a person can find a wiki, share/change/revoke access and understand pending or uncertain changes; secure sessions, current authorization and accessible interaction are release requirements |
-
-Use the [everyday agent check](../examples/agent-acceptance.md) for a small
-read-only pilot. The existing [thirty-case workflow](../examples/acceptance.md)
-remains the ingestion/PDF/OCR qualification. A scripted MCP check proves transport
-and retrieval behavior, not that a hosted agent chooses to consult it. Retain
-those results separately and fix concrete failures before adding features.
-
-Reuse a verified populated restore when its source, schema and recovery scope
-still apply. Check that the recorded snapshot remains retained and identify any
-unverified changes; do not repeat a disruptive cold capture or full cloud read
-merely to refresh a roadmap checkbox. Rehearse schema changes on copied state.
-
-Delivery recovery belongs in the existing consumer and its scheduler. Before a
-job is observed, replay only unchanged input with the same ID. Once a job is
-known, inspect/reconcile it; never automatically rerun failed, interrupted or
-uncertain model work, or repeat the whole email task's other side effects.
-Retain visible failures and require explicit action when recovery is paused.
-Older metadata-only receipts cannot reconstruct missing source bytes and must
-not be silently replayed with regenerated content. See
-[submission recovery](clients.md#recoverable-submissions-and-jobs).
-
-Browser acceptance starts with named sharing and revocation. The implemented
-copy/archive, device, agent and instance-owner controls remain available; they
-do not enlarge the immediate acceptance scope for clients that do not use them.
-Further administration features need demonstrated demand. The existing CLI
-remains supported, and provider-wide account administration stays in the identity
-provider. Qualify the implemented logout integration with its configured issuer;
-local suspension and current-grant enforcement remain required independently.
-
-The optional writable inbox is outside this immediate sequence. Introduce it
-only for a named workflow that existing email/API intake cannot serve; consent,
-storage limits, duplicate handling and recovery are prerequisites to exposing it.
-
-Keep facts in their granted wikis and installation/quality receipts private. Use
-the existing acceptance specification and a small results record; a new evaluation
-framework, profile system, maintenance linter or queue service is unnecessary.
-Qualify the actual consumer being adopted; unrelated Windows/SMB adoption does
-not block an agent workflow. Search remains lexical and scores from separate
-wiki indexes are not calibrated global relevance. Improve retrieval or context
-selection only after recorded misses show the smallest useful change.
+Use discovery, revision-pinned reads, lexical retrieval and source-backed answers
+through the actual adopted consumer. See [the small acceptance guide](../examples/agent-acceptance.md).
+A guided trial does not establish autonomous normal use or every client/size.
+Fix demonstrated workflow failures without adding a new retrieval, evaluation or
+administration service merely to produce more status.
 
 ## Product standard and architecture
 
@@ -118,11 +59,12 @@ These capabilities exist in source, separately from installation acceptance.
 |---|---|
 | Knowledge | Private wikis, preserved originals and extracted references, lexical search, history and rollback |
 | Human access | Explicit read/contribute/write/admin grants; the configured owner creates wikis and registers agents |
-| Browser access management | Dedicated OIDC sessions, wiki list/create, named sharing, role changes/removal, pending retries, durable receipts and grant activity; see [web scope](web-ui.md) |
+| Browser access management | Dedicated OIDC sessions, wiki list/create, named sharing, role changes/removal, pending retries, durable receipts, grant activity, copy/archive settings, devices and owner account controls; see [web scope](web-ui.md) |
 | Local copies | User/wiki copy settings, scoped Git credentials and current permission checks before synchronization |
 | Device sync | Single-copy and batch sync, opt-in discovery, exclusions, per-copy locks and structured failures |
-| Network drive | SMB drive per person following grants and copy policy; writers edit Markdown pages, published as attributed, merged commits with conflict copies; originals read-only; revocable device credentials; optional per-person writable inbox |
-| Agent access | Separately revocable keys or explicit Pocket ID workload bindings; read/contribute ceiling and no managed Git copies |
+| Network drive | SMB drive per person following grants and copy policy; writers edit Markdown pages, published as attributed, merged commits with conflict copies; originals read-only; revocable device credentials; optional per-person inbox folders, with intake supplied separately |
+| Agent access | Separately revocable keys or explicit Pocket ID workload bindings; read/contribute ceiling and no managed Git copies; service names/purpose, effective wiki roles and throttled usage observations |
+| App attribution | Observed OAuth apps and authenticated client IDs on new ingest jobs/commits; observations are not a provider consent inventory |
 | Offboarding | Local suspension blocks human sessions and owned agents; backend revocation remains pending until confirmed |
 | Archival | Reads and evidence retained, writes stopped, unfinished ingests interrupted and Git credentials revoked |
 | Intake support | Text/HTML, PDF and image OCR, email bodies and attachments; extraction preview; up to 20 source parts in one replayable HTTP submission; guarded undo of the caller's latest unmerged ingest |
@@ -154,7 +96,9 @@ Implementation anchors: [publication and retrieval](../src/wiki_hub/service.py),
 and [bundled worker](../src/wiki_hub/runner.py). The milestones below retain the
 contracts and required evidence; implemented source alone does not close them.
 
-## Outstanding work after the source audit
+<a id="outstanding-work-after-the-source-audit"></a>
+
+## Qualification contracts
 
 The recoverable journal, revision-pinned evidence, FTS5 search, whole-page context
 selection, native workload bindings and editable network drive are implemented.
@@ -162,16 +106,36 @@ They are not a list of features still to build. The [source audit](audit.md)
 records the correctness fixes and their regression coverage separately from a
 release or installation claim.
 
-| Work | What remains |
+### Optional integration boundaries
+
+There is no missing core retrieval or browser-administration feature in this
+scope. The optional writable inbox still needs a consent-aware intake consumer,
+enforced storage bounds, duplicate handling and recoverable outcomes before it
+can be offered as ingestion. Folder provisioning and SMB access alone do not
+provide those behaviors. Build this only for an adopted workflow that email/API
+intake cannot serve.
+
+Further work should address a reproduced failure or an unmet workflow rather
+than add a general policy, receipt or evaluation framework. See the
+[access overview](web-ui.md#access-overview) for the implemented service/app
+visibility and its attribution limits.
+
+### Delivery and qualification
+
+These checks apply to each installation and adopted client. Reuse applicable
+private receipts instead of treating every row as unverified or repeating an
+accepted model run, restore or consumer recovery rehearsal. Record a new result
+when the source, schema, configuration or tested workflow changes its scope.
+
+| Area | Required evidence and scope |
 |---|---|
-| Web installation acceptance | Configure the separate browser client and read-only directory key; qualify real My Apps discovery, pre-login recipient selection, delegated sharing and existing-session revocation; [checklist](web-ui.md#implementation-status-and-remaining-work) |
-| Browser control acceptance | Logout hooks, member-label refresh, settings, agents, devices and owner administration are implemented; qualify them on the installed identity and file server. Invitations/groups/expiry remain deferred |
-| Drive recovery and diagnostics | Implementation is complete; qualify recovery of unpublished edits and base metadata, per-page quiet periods and caller-owned diagnostics on the installed release |
-| Optional writable inbox | Deferred until a named need is unmet by email/API intake. Consent, storage bounds and recovery must precede exposure; provisioning folders alone is insufficient |
-| Email delivery recovery | Qualify the consuming application through temporary downtime and restart, lost acknowledgement, accepted-job observation and paused recovery; no whole-agent or failed-model retry |
-| Agent usefulness and operating size | Run the small everyday check on the actual consumer; keep its consultation/answer results separate from transport tests. Reuse applicable 30-case ingestion evidence and record the intended collection size and observed latency; qualify unmeasured resource limits separately |
-| Installed clients | Accept each actual Windows, second-person and hosted-client flow, including conflicts, sleep/resume and connected revocation. Source tests do not establish device adoption |
-| Delivery and recovery | Track each source release, public export and running image separately; confirm installed client identities and rehearse a populated restore including unpublished drive edits and current restrictions |
+| Web entry and sharing | Dedicated browser client, encrypted session state and read-only directory adapter; real sign-in/discovery, recipient selection before first login, actual add/change/remove and delegated/second-person existing-session revocation. Owner sign-in or a cancelled picker alone does not establish sharing |
+| Browser administration and access overview | Installed logout/refresh, label refresh, pending settings, service metadata/roles, observed apps, device confirmation and account controls where used. Automated checks do not establish human usability or accessibility |
+| Drive recovery and diagnostics | Recovery of unpublished edits and base metadata, per-page quiet periods and caller-owned diagnostics on the installed release; a general populated restore alone does not establish unpublished-view recovery |
+| Unattended delivery | Consumer downtime/restart, lost acknowledgement, accepted-job observation and paused recovery, without whole-agent or failed-model retry. Keep this consumer evidence separate from server replay tests |
+| Agent usefulness and operating size | Actual-consumer consultation/answers, intended collection size, latency and resource limits. A guided retrieval pilot or small ingestion sample does not establish autonomous normal use or larger collection performance |
+| Installed clients | Each adopted Windows, second-person and hosted-client flow, including conflicts, sleep/resume and connected revocation where applicable. Source tests and native CLI checks do not establish physical-device adoption |
+| Delivery and general recovery | Source release, public export and running image tracked separately; copied-state upgrade and applicable populated Git/LFS/catalog/grant restore evidence, with current restrictions reconciled before reopening access |
 
 Office conversion, voice transcription, self-service/group enrollment and new
 retrieval infrastructure remain deliberate deferrals. There is no general

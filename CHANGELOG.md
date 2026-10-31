@@ -2,6 +2,30 @@
 
 All notable changes are recorded here. This project follows Semantic Versioning.
 
+## [0.18.1] - 2026-10-31
+
+_No changes to the published package; correct standalone export qualification fixtures._
+
+### Upgrade
+
+- Action required: none.
+- Rollback: compatible with 0.18.0.
+
+## [0.18.0] - 2026-10-31
+
+_Yanked: public export qualification rejects a synthetic fixture URL; use 0.18.1._
+
+### Added
+
+- Create a clean wiki from its title and optional purpose, with a generated short name under Advanced. Open its overview with a private-access explanation and separate sharing action (fe3fd37).
+- Add a file or pasted text from the overview using the existing source-preserving pipeline. Show recent job outcomes and recover a lost submission reply without starting another ingest, preserving edited drafts and the submission identity through denied retries (8de3c7a).
+- Keep the fictional example in optional overview Help instead of inserting example records into new collections. Existing collections are preserved (fe3fd37).
+
+### Upgrade
+
+- Action required: none. Existing example collections are not changed automatically.
+- Rollback: compatible with 0.17.0; no catalog schema changes. New seed content and ingests remain ordinary Git history.
+
 ## [0.17.0] - 2026-10-31
 
 ### Added
@@ -38,3 +62,7 @@ _Releases 0.1.0–0.16.2 were not recorded here; see their tags._
 [0.16.3]: https://github.com/benjamin-di/wiki-hub-server/releases/tag/v0.16.3
 
 [0.17.0]: https://github.com/benjamin-di/wiki-hub-server/releases/tag/v0.17.0
+
+[0.18.0]: https://github.com/benjamin-di/wiki-hub-server/releases/tag/v0.18.0
+
+[0.18.1]: https://github.com/benjamin-di/wiki-hub-server/releases/tag/v0.18.1

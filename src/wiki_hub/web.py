@@ -134,11 +134,11 @@ class BrowserWeb:
         if not hmac.compare_digest(supplied, session["csrf"]):
             raise Denied("This page has expired. Reload it before making changes.")
 
-    async def body(self, request):
+    async def body(self, request, maximum=8192):
         data = bytearray()
         async for chunk in request.stream():
             data.extend(chunk)
-            if len(data) > 8192:
+            if len(data) > maximum:
                 raise ContentError("This request is too large.")
         try:
             value = json.loads(data)
@@ -153,7 +153,8 @@ class BrowserWeb:
         role = "admin" if wiki["owner"] == subject else self.service.state.role(subject, slug)
         return {"slug": slug, "title": wiki["title"], "status": wiki["status"], "role": role,
                 "owner": wiki["owner"] == subject, "manage": role == "admin",
-                "read_only": wiki["status"] in ARCHIVE_STATES,
+                "private": wiki["owner"] == subject and not self.service.state.grants(slug),
+                "read_only": wiki["status"] in ARCHIVE_STATES or wiki["status"] == "initializing",
                 "local_copies": self.service.state.copies_allowed(subject, slug)}
 
     def snapshot(self, subject, slug):
@@ -229,7 +230,7 @@ class BrowserWeb:
                 return self.render("settings", wiki=wiki,
                                    copies=await self.service.wiki_settings(subject, slug),
                                    archive=await self.service.archive(subject, slug), **common)
-            return self.render("wiki", wiki=wiki, **common)
+            return self.render("wiki", wiki=wiki, upload_limit=self.settings.upload_limit, **common)
         except LoginRequired:
             return self.render("signin", enabled=True, return_to=quote(local_return(request.url.path), safe=""))
         except (Denied, ContentError):
@@ -471,8 +472,36 @@ class BrowserWeb:
                 return JSONResponse({"active": True}, headers=HEADERS)
             if path == ["wikis"] and request.method == "POST":
                 data = await self.body(request)
-                result = await self.service.create(subject, data["slug"], data["title"])
+                result = await self.service.create(subject, data["slug"], data["title"],
+                                                   data.get("purpose", ""), new=True)
                 return JSONResponse(result, status_code=201, headers=HEADERS)
+            if len(path) == 3 and path[0] == "wikis" and path[2] in ("sources", "submission"):
+                slug, operation = path[1:]
+                self.service.allowed(subject, slug)
+                if operation == "sources":
+                    access = self.summarize(subject, slug)
+                    if access["status"] == "initializing":
+                        if request.method == "POST":
+                            raise ContentError("Finish the original wiki creation request before adding sources.")
+                        return JSONResponse({"has_sources": False, "access": access, "wiki": slug,
+                                             "jobs": [], "next_before": None}, headers=HEADERS)
+                    if request.method == "POST":
+                        self.service.allowed(subject, slug, "contribute")
+                        maximum = (self.settings.upload_limit + 2) // 3 * 4 + 128 * 1024
+                        data = await self.body(request, maximum)
+                        result = await self.service.ingest(
+                            subject, slug, data["filename"], data["content_base64"],
+                            submission_id=data["submission_id"], client_id=self.settings.web_client_id)
+                        return JSONResponse(result, status_code=202, headers=HEADERS)
+                    pages = await self.service.pages(subject, slug)
+                    jobs = await self.service.jobs(subject, slug, limit=10)
+                    return JSONResponse({"has_sources": pages["has_sources"], "access": self.summarize(subject, slug),
+                                         **jobs}, headers=HEADERS)
+                if request.method == "GET":
+                    row = self.service.state.submission(subject, slug, request.query_params.get("id", ""))
+                    result = await self.service.job(subject, row["id"]) if row else None
+                    self.service.allowed(subject, slug)
+                    return JSONResponse({"job": result}, headers=HEADERS)
             if path and (path[0] in ("agents", "devices", "accounts") or
                          (len(path) == 3 and path[0] == "wikis" and path[2] in ("settings", "archive", "profiles"))):
                 result = await self.controls(request, subject, path)
@@ -523,7 +552,8 @@ class BrowserWeb:
                 try:
                     self.service.require_active(subject)
                     if slug:
-                        self.service.allowed(subject, slug, "admin")
+                        level = "read" if path[-1] in ("sources", "submission") else "admin"
+                        self.service.allowed(subject, slug, level)
                     access_lost = False
                 except Denied:
                     pass

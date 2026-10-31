@@ -359,3 +359,17 @@ def test_git_commands_bound_packing_memory(empty_store):
     store, _wiki, remote = empty_store
     assert store.run(remote, "config", "--get", "pack.threads").strip() == b"2"
     assert store.run(remote, "config", "--get", "core.bigFileThreshold").strip() == b"16m"
+
+
+def test_seed_keeps_title_and_purpose_literal_without_changing_existing_history(empty_store):
+    store, wiki, _ = empty_store
+    wiki["title"] = "<script>Title</script> [link](https://git.example.test)"
+    store.seed(wiki, "# Purpose\n[link](https://git.example.test)")
+    repo = store.repo(wiki["slug"])
+    content = store.read(repo, "wiki/index.md").decode()
+    assert "\\<script\\>" in content and "\\[link\\]" in content
+    assert "Purpose: \\# Purpose" in content
+    revision = store.revision(repo)
+    store.seed(wiki, "Do not replace the existing purpose")
+    assert store.revision(repo) == revision
+    assert set(store.list_files(repo)) == {"AGENTS.md", ".gitattributes", "wiki/index.md"}

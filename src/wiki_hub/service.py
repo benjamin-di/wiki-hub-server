@@ -26,7 +26,7 @@ from .extraction import extract_text
 from .forgejo import Forgejo, ForgejoError
 from .gitstore import ContentError, GitError, GitStore, PushRejected, content_path, validate_slug
 from .search import Query, SearchIndex, lines, searchable, summary
-from .state import State
+from .state import AccessConflict, State
 
 log = logging.getLogger(__name__)
 ROLES = {"read": 0, "contribute": 1, "write": 2, "admin": 3}
@@ -565,16 +565,20 @@ class Service:
                 pass
         return {"id": identifier, "revoked": True}
 
-    async def create(self, subject, slug, title):
+    async def create(self, subject, slug, title, purpose="", *, new=False):
         self.require_active(subject)
         validate_slug(slug)
         if not self.settings.owner_subject or subject != self.settings.owner_subject:
             raise Denied("Only the configured owner can create wikis in this first release.")
         if not isinstance(title, str) or not 1 <= len(title) <= 200 or "\n" in title:
             raise ContentError("Provide a title of 1–200 characters on one line.")
+        if not isinstance(purpose, str) or len(purpose) > 1000 or "\x00" in purpose:
+            raise ContentError("Keep the optional purpose within 1,000 characters.")
         async with self.write_lock(slug), self.lock(slug):
             existing = self.state.wiki(slug)
             if existing:
+                if new:
+                    raise AccessConflict("That short name is already in use. Choose another under Advanced.")
                 wiki = self.allowed(subject, slug)
                 if wiki["status"] in ARCHIVE_STATES:
                     raise ContentError("This wiki is archived or pending. Use wiki reopen to make it writable.")
@@ -585,7 +589,7 @@ class Service:
                 repo = await self._thread(self.forgejo.create_repository, owner, slug)
                 self.state.add_wiki(slug, title, subject, owner, repo["id"])
                 wiki = self.state.wiki(slug)
-            await self._thread(self.git.seed, wiki)
+            await self._thread(self.git.seed, wiki, purpose)
             self.state.ready(slug)
             self._schedule_drive(slug)
             return {"slug": slug, "title": wiki["title"], "status": "ready"}
@@ -607,6 +611,7 @@ class Service:
         return {
             "wiki": wiki,
             "revision": revision,
+            "has_sources": any(p.startswith("raw/") for p in paths),
             "pages": [p for p in paths if p.startswith("wiki/") and p.endswith(".md") and searchable(p)],
             "files": files,
         }

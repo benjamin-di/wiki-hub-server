@@ -147,15 +147,16 @@ already running bounded Git/extraction operation to finish; abandoning its lock
 would restore the race. Archive remains a retention operation, and writable
 inbox provisioning alone does not implement capture, consent or storage quotas.
 
-Browser administration controls are implemented; installed identity/directory and
-human acceptance remain separate. Remaining product work includes integrating
-the optional writable inbox's consent-aware consumer and storage limits if that
-workflow is wanted. Core agent discovery,
+Browser administration and the service/app access overview are implemented;
+installed identity/directory and human acceptance remain separate. Remaining
+product work includes integrating the optional writable inbox's consent-aware
+consumer and storage limits if that workflow is wanted. Core agent discovery,
 search, revision-pinned reads, recoverable ingestion and editable drive pages
 already exist. Release/publication, installed-client checks, representative
-knowledge/size measurements and a populated restore are acceptance work rather
-than missing retrieval features. No new retrieval service is required by this
-audit.
+knowledge/size measurements and populated recovery evidence are qualification
+work rather than missing retrieval features. Reuse accepted, applicable receipts;
+a general restore does not by itself qualify unpublished drive edits. No new
+retrieval service is required by this audit.
 
 The [roadmap](roadmap.md#outstanding-work-after-the-source-audit) separates
 remaining implementation/integration from model-quality measurements, release
@@ -194,3 +195,22 @@ The expanded offline identity/service suite and six Chromium cases cover these
 controls, pending copy retries, secret dismissal, agent revocation and manager
 revocation while settings remain open. Real provider, file-server, passkey and
 human usability acceptance remain installation work, recorded separately.
+
+## Service and app access overview
+
+The access overview shows registered services' effective per-wiki roles, owner
+ceilings, pending restrictions, credential type and editable names/purpose. It
+keeps revoked registrations as collapsed history and separates observed OAuth
+apps from independent services. Authenticated observations are throttled and
+store no request content; they are not a provider consent or session inventory.
+New ingestion jobs and commits retain verified client attribution, including
+assertions from the separately authenticated trusted-gateway transport. Public
+caller headers cannot set that attribution.
+
+Synthetic checks cover effective access, suspension, pending grants, metadata
+ownership, observed-app isolation, escaped labels and gateway attribution. See
+[service access regressions](../tests/test_service.py),
+[web regressions](../tests/test_web.py), [gateway regressions](../tests/test_gateway.py) and
+[supported behavior](web-ui.md#access-overview). Additive catalog fields preserve
+existing grants and registrations; earlier usage and job attribution are not
+invented. Installed verification remains separate from these source checks.

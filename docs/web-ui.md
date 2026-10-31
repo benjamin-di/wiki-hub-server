@@ -8,7 +8,8 @@ or change grants; instance-wide account controls remain separate.
 
 The interface provides wiki discovery and creation, sharing, pending-change
 recovery, grant activity, copy/archive settings, agent registration and revocation,
-drive-device management and instance-owner account administration. All controls
+drive-device management, instance-owner account administration and a
+[service/app access overview](#access-overview). All controls
 reuse the service's authorization and backend confirmation rules.
 
 ## Implementation status and remaining work
@@ -36,7 +37,9 @@ review current state before changing a setting from an old tab.
 
 Source checks cover grant changes, pending recovery, session revocation and
 administrative authorization. See [audit findings](audit.md#browser-and-sharing-audit).
-Installation acceptance still requires:
+Use the following installation checklist with its private acceptance records.
+Retain the scope of each accepted step; sign-in and a cancelled recipient
+selection do not establish an actual grant or second-person revocation:
 
 1. Release and deploy the independently reviewed source. Browser routes precede
    the MCP mount and preserve any separately configured gateway transport.
@@ -45,7 +48,10 @@ Installation acceptance still requires:
 3. Verify Pocket ID My Apps discovery, real sign-in/refresh/logout, recipient
    selection before first login, delegated sharing, backend/directory outages,
    and revocation in an existing browser session.
-4. Have someone unfamiliar with the CLI complete add/change/remove access. Check
+4. Verify the [access overview](#access-overview): effective service roles,
+   metadata edits without grant changes, observed apps and new-job attribution.
+   Earlier usage remains unknown; observations do not prove provider consent.
+5. Have someone unfamiliar with the CLI complete add/change/remove access. Check
    keyboard, screen-reader and mobile operation. Automated browser checks do not
    establish WCAG 2.2 AA or the usability target.
 
@@ -237,3 +243,40 @@ Public API or MCP arguments and headers cannot override the verified client.
 A trusted gateway may assert `X-Wiki-Client` alongside `X-Wiki-Subject`, but must
 overwrite both from verified token claims on every upstream request. Missing
 client assertions remain identified as an unspecified gateway app.
+
+## Creating a wiki and adding its first source
+
+Create wiki asks for a title and optional purpose. The short name is generated
+from the title and can be edited under Advanced before creation. It is permanent;
+a conflicting name is rejected instead of opening an unrelated existing wiki.
+Creation opens the overview. New collections use one bundled clean structure:
+root citation instructions, Git LFS source handling and an index containing the
+title and purpose. No example records or grants are copied. Seed changes apply
+only before a repository's first commit, including recovery after a failed push.
+The optional purpose is initial index content, not a separately editable setting.
+The bearer creation endpoint also accepts an optional `purpose` (up to 1,000 characters).
+
+The overview offers file upload or pasted text to Contributors, Editors, Managers
+and the owner, while writable. Original bytes and extracted references use the
+same ingestion pipeline as other clients. Accepted ingests save automatically.
+The overview shows recent job outcomes, including failure, interruption and an
+unconfirmed save; a status refresh never reruns the model. Readers can see source
+activity but cannot submit. Current role and archive checks apply on every request.
+Sharing is a separate secondary action. The owner-only label reflects the current
+grant list; a link never gives a recipient access.
+
+Each browser submission retains a random ID and input fingerprint in tab session
+storage, without source bytes or authentication tokens. A lost reply offers
+**Check submission**, including after a reload. The lookup is scoped to the signed-in
+person and wiki. Retrying the same bytes/name uses the same ID; a different source
+cannot replace unconfirmed input. Once a job is known, inspect its outcome rather
+than blindly submitting it again. Confirmation clears only matching input; a
+different or partial current draft is preserved and marked as unsent. Browser storage may be unavailable: the ID then
+survives only while the page stays open. Recent jobs remain available on the server.
+Automatic status polling is bounded; Refresh status continues a longer job.
+
+The optional example walkthrough lives in Help on the overview; it is never
+inserted into a user's collection. Upgrading does not modify or remove existing
+example collections. Operators must inspect their content, history, active jobs
+and consumers before retiring one; preserve its history and finish managed-copy
+and non-owner access revocation before calling that retirement complete.

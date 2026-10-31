@@ -716,3 +716,112 @@ def test_access_overview_and_service_details_are_scoped_and_escape_html(browser_
         sign_in(client, app, identity, subject='reader')
         assert 'Source helper' not in client.get('/agents').text
         assert client.post(endpoint, headers=csrf_headers(client, app), json={'name': 'Stolen'}).status_code == 403
+
+
+def wait_source(client, slug, job_id):
+    import time
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        result = client.get(f"/ui/api/wikis/{slug}/sources")
+        assert result.status_code == 200, result.text
+        job = next(j for j in result.json()["jobs"] if j["id"] == job_id)
+        if job["status"] not in ("queued", "running", "publishing"):
+            return job
+        time.sleep(.02)
+    raise AssertionError("Synthetic ingestion did not finish")
+
+
+def test_browser_first_source_preserves_original_and_recovers_lost_reply(browser_app):
+    import base64
+    app, identity = browser_app
+    service = app.state.service
+    with TestClient(app, base_url=identity.settings.public_url) as client:
+        sign_in(client, app, identity)
+        headers = csrf_headers(client, app)
+        data = {"slug": "new-wiki", "title": "New wiki", "purpose": "Keep plans"}
+        assert client.post("/ui/api/wikis", headers=headers, json=data).status_code == 201
+        assert client.post("/ui/api/wikis", headers=headers, json=data).status_code == 409
+        overview = client.get("/wikis/new-wiki")
+        assert "Only you have access" in overview.text and 'id="source-form"' in overview.text
+        assert not client.get("/ui/api/wikis/new-wiki/sources").json()["has_sources"]
+        source = "Original café notes\nDoors open at 09:30.\n"
+        body = {"filename": "notes.txt", "content_base64": base64.b64encode(source.encode()).decode(),
+                "submission_id": "browser-source-one"}
+        assert client.post("/ui/api/wikis/new-wiki/sources", json=body).status_code == 403
+        first = client.post("/ui/api/wikis/new-wiki/sources", headers=headers, json=body)
+        assert first.status_code == 202
+        job_id = first.json()["id"]
+        assert first.json()["client_id"] == "wiki-web"
+        recovered = client.get("/ui/api/wikis/new-wiki/submission?id=browser-source-one").json()["job"]
+        assert recovered["id"] == job_id
+        replay = client.post("/ui/api/wikis/new-wiki/sources", headers=headers, json=body)
+        assert replay.json()["id"] == job_id
+        done = wait_source(client, "new-wiki", job_id)
+        assert done["status"] == "completed", done
+        assert client.get("/ui/api/wikis/new-wiki/sources").json()["has_sources"]
+        assert service.git.original(service.state.wiki("new-wiki"), f"raw/{job_id}-notes.txt").read_text() == source
+        assert len(service.state.jobs("new-wiki")) == 1
+        body["content_base64"] = base64.b64encode(b"changed").decode()
+        assert client.post("/ui/api/wikis/new-wiki/sources", headers=headers, json=body).status_code == 400
+
+
+def test_browser_source_current_roles_archive_failures_and_body_bounds(browser_app):
+    import base64
+    app, identity = browser_app
+    service = app.state.service
+    asyncio.run(service.create("owner", "starter", "Team handbook"))
+    async def fail(*args):
+        raise RuntimeError("Synthetic model failure")
+    service.runner = fail
+    body = {"filename": "note.txt", "content_base64": base64.b64encode(b"Workshop source").decode(),
+            "submission_id": "browser-failure"}
+    with TestClient(app, base_url=identity.settings.public_url) as owner:
+        sign_in(owner, app, identity)
+        assert owner.post("/ui/api/wikis/starter/sources", headers=csrf_headers(owner, app),
+                          json=body).status_code == 202
+        job = owner.get("/ui/api/wikis/starter/submission?id=browser-failure").json()["job"]
+        assert wait_source(owner, "starter", job["id"])["status"] == "failed"
+        for _ in range(2):
+            assert owner.get("/ui/api/wikis/starter/sources").json()["jobs"][0]["status"] == "failed"
+        assert len(service.state.jobs("starter")) == 1
+        limit = app.state.web.settings.upload_limit
+        huge = {**body, "content_base64": "x" * (limit * 2)}
+        assert owner.post("/ui/api/wikis/starter/sources", headers=csrf_headers(owner, app),
+                          json=huge).status_code == 400
+        asyncio.run(service.share("owner", "starter", "reader", "read"))
+        with TestClient(app, base_url=identity.settings.public_url) as reader:
+            sign_in(reader, app, identity, "reader")
+            assert 'id="source-form"' not in reader.get("/wikis/starter").text
+            assert reader.get("/ui/api/wikis/starter/sources").status_code == 200
+            assert reader.get("/ui/api/wikis/starter/submission?id=browser-failure").json()["job"] is None
+            denied = reader.post("/ui/api/wikis/starter/sources", headers=csrf_headers(reader, app), json=body)
+            assert denied.status_code == 403 and not denied.json()["access_lost"]
+            asyncio.run(service.share("owner", "starter", "reader", "contribute"))
+            assert 'id="source-form"' in reader.get("/wikis/starter").text
+            asyncio.run(service.share("owner", "starter", "reader", "none"))
+            assert reader.get("/ui/api/wikis/starter/sources").status_code == 403
+        asyncio.run(service.archive("owner", "starter", True))
+        assert 'id="source-form"' not in owner.get("/wikis/starter").text
+        assert owner.post("/ui/api/wikis/starter/sources", headers=csrf_headers(owner, app),
+                          json=body).status_code == 403
+
+
+def test_browser_unfinished_creation_is_visible_without_accepting_sources(browser_app, monkeypatch):
+    from wiki_hub.gitstore import GitError
+    app, identity = browser_app
+    service = app.state.service
+    def fail_seed(*args):
+        raise GitError("Synthetic seed unavailable")
+    monkeypatch.setattr(service.git, "seed", fail_seed)
+    with TestClient(app, base_url=identity.settings.public_url) as client:
+        sign_in(client, app, identity)
+        headers = csrf_headers(client, app)
+        assert client.post("/ui/api/wikis", headers=headers,
+                           json={"slug": "unfinished", "title": "Original title"}).status_code == 503
+        page = client.get("/wikis/unfinished")
+        assert page.status_code == 200 and "Wiki creation is unfinished" in page.text
+        assert 'id="source-form"' not in page.text
+        assert client.get("/ui/api/wikis/unfinished/sources").json()["jobs"] == []
+        assert client.post("/ui/api/wikis/unfinished/sources", headers=headers,
+                           json={}).status_code == 400
+        assert service.state.jobs("unfinished") == []

@@ -68,13 +68,41 @@
   $("wiki-search")?.addEventListener("input", filterWikis);
   $("show-archived")?.addEventListener("change", filterWikis);
   if ($("wiki-search")) filterWikis();
-  $("create-open")?.addEventListener("click", () => $("create-dialog").showModal());
+  let customSlug = false;
+  const fallbackSlug = "wiki-" + crypto.randomUUID().slice(0, 8);
+  function suggestedSlug() {
+    let value = $("wiki-title").value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    if (!value) return fallbackSlug;
+    if (!/^[a-z]/.test(value)) value = "wiki-" + value;
+    return value.slice(0, 63).replace(/-$/g, "");
+  }
+  $("create-open")?.addEventListener("click", () => {
+    if (!customSlug) $("wiki-slug").value = suggestedSlug();
+    $("create-dialog").showModal(); $("wiki-title").focus();
+  });
+  $("wiki-title")?.addEventListener("input", () => {
+    if (!customSlug) $("wiki-slug").value = suggestedSlug();
+  });
+  $("wiki-slug")?.addEventListener("input", () => { customSlug = true; });
+  $("wiki-slug")?.addEventListener("invalid", () => { $("create-advanced").open = true; });
   $("create-form")?.addEventListener("submit", async event => {
     event.preventDefault(); const button = event.submitter; button.disabled = true;
     try {
-      const value = await request("/ui/api/wikis", {slug: $("wiki-slug").value, title: $("wiki-title").value});
-      location.assign("/wikis/" + encodeURIComponent(value.slug) + "/access");
-    } catch (error) { message(error.message, true, "create-error"); button.disabled = false; }
+      const value = await request("/ui/api/wikis", {slug: $("wiki-slug").value,
+        title: $("wiki-title").value.trim(), purpose: $("wiki-purpose").value.trim()});
+      location.assign("/wikis/" + encodeURIComponent(value.slug));
+    } catch (error) {
+      if (stopped) return;
+      message(error.message, true, "create-error");
+      if (error.status === 409) { $("create-advanced").open = true; $("wiki-slug").focus(); }
+      if (!error.status || error.status >= 500) {
+        message("Creation could not be confirmed. Check the wiki before trying again.", true, "create-error");
+        const link = element("a", "Check wiki", "button");
+        link.href = "/wikis/" + encodeURIComponent($("wiki-slug").value); $("create-error").append(link);
+      }
+      button.disabled = false;
+    }
   });
 
   $("credential-close")?.addEventListener("click", () => {
@@ -161,6 +189,178 @@
     };
     refreshNames.addEventListener("click", refreshAccountNames);
     refreshAccountNames();
+  }
+
+  const sources = $("sources-page");
+  if (sources) {
+    const base = "/ui/api/wikis/" + encodeURIComponent(sources.dataset.wiki);
+    const receiptKey = "wiki-submission:" + sources.dataset.subject + ":" + sources.dataset.wiki;
+    let pending = null, sending = false, checkingSubmission = false, refreshing = false, timer, polls = 0;
+    try { pending = JSON.parse(sessionStorage.getItem(receiptKey)); } catch { /* Storage may be disabled. */ }
+    if (!pending || typeof pending.id !== "string" || typeof pending.fingerprint !== "string") pending = null;
+    function remember(value) {
+      pending = value;
+      try {
+        if (value) sessionStorage.setItem(receiptKey, JSON.stringify(value));
+        else sessionStorage.removeItem(receiptKey);
+      } catch { /* The receipt stays in memory; source bytes never enter browser storage. */ }
+    }
+    function notice(text, error = false) { message(text, error, "source-message"); }
+    function accepted(job, clearDraft = true) {
+      remember(null);
+      $("source-check").hidden = true;
+      $("source-different").hidden = true;
+      const text = document.querySelector('[name="source-kind"]:checked').value === "text";
+      const otherDraft = text ? $("source-file").files.length : $("source-name").value || $("source-text").value;
+      if (clearDraft) {
+        // Clear only the confirmed source, keeping drafts entered in the other mode.
+        if (text) { $("source-name").value = ""; $("source-text").value = ""; }
+        else $("source-file").value = "";
+        if (otherDraft) {
+          document.querySelector('[name="source-kind"][value="' + (text ? "file" : "text") + '"]').checked = true;
+          chooseKind();
+        }
+      }
+      notice(clearDraft && !otherDraft ? "Source received. Its progress is shown below; you can leave this page."
+        : "Previous source received. Your unsent source is still here and has not been submitted.");
+      polls = 0;
+    }
+    async function refreshSources() {
+      if (stopped || refreshing || document.hidden) return;
+      refreshing = true; clearTimeout(timer);
+      try {
+        const result = await request(base + "/sources");
+        if (stopped) return;
+        message("", false, "sources-error");
+        if ($("source-form")) $("source-form").hidden = result.access.read_only || result.access.role === "read";
+        $("overview-sharing")?.toggleAttribute("hidden", !result.access.manage);
+        $("overview-access").textContent = result.access.private ? "Only you have access"
+          : result.access.owner ? "Owner" : labels[result.access.role];
+        if ($("source-heading")) $("source-heading").textContent = result.has_sources ? "Add a source" : "Add your first source";
+        const list = $("source-jobs"); list.replaceChildren();
+        const states = {queued: "Waiting to organize", running: "Organizing", publishing: "Saving",
+          completed: "Saved automatically", failed: "Needs review · failed", interrupted: "Needs review · interrupted",
+          uncertain: "Needs review · save not confirmed"};
+        if (!result.jobs.length) list.append(element("p", "No sources submitted yet.", "muted"));
+        for (const job of result.jobs) {
+          const row = element("article", undefined, "activity-item"); row.dataset.job = job.id;
+          row.append(element("strong", job.filename), element("p", states[job.status] || job.status));
+          if (job.error) row.append(element("p", job.error, "error"));
+          if (["failed", "interrupted", "uncertain"].includes(job.status)) {
+            row.append(element("p", "Review this source before submitting it again. It will not be retried automatically.", "help"));
+          }
+          const detail = element("details"), summary = element("summary", "Job details"); detail.append(summary);
+          detail.append(element("p", "Job: " + job.id, "help"));
+          if (job.revision) detail.append(element("p", "Accepted revision: " + job.revision, "help"));
+          row.append(detail); list.append(row);
+        }
+        if (result.jobs.some(job => ["queued", "running", "publishing"].includes(job.status)) && polls++ < 40) {
+          timer = setTimeout(refreshSources, 3000);
+        }
+      } catch (error) { if (!stopped) message(error.message, true, "sources-error"); }
+      finally { refreshing = false; }
+    }
+    function chooseKind() {
+      const text = document.querySelector('[name="source-kind"]:checked')?.value === "text";
+      $("source-file-fields").hidden = text; $("source-text-fields").hidden = !text;
+      $("source-file").disabled = text; $("source-file").required = !text;
+      for (const id of ["source-name", "source-text"]) { $(id).disabled = !text; $(id).required = text; }
+    }
+    document.querySelectorAll('[name="source-kind"]').forEach(input => input.addEventListener("change", chooseKind));
+    async function checkSubmission() {
+      if (!pending || sending || checkingSubmission || stopped) return;
+      checkingSubmission = true;
+      for (const id of ["source-check", "source-submit", "source-inputs", "source-different"]) $(id).disabled = true;
+      try {
+        const result = await request(base + "/submission?id=" + encodeURIComponent(pending.id));
+        if (stopped) return;
+        if (result.job) {
+          let clearDraft = !$("source-file").files.length && !$("source-name").value && !$("source-text").value;
+          if (!clearDraft) {
+            try { clearDraft = (await sourceInput()).fingerprint === pending.fingerprint; }
+            catch { /* Keep partial or invalid unsent edits as well. */ }
+          }
+          accepted(result.job, clearDraft); await refreshSources();
+        }
+        else notice("No saved submission found yet. Check again or retry the same source; it won't create a duplicate.", true);
+      } catch (error) { if (!stopped) notice(error.message, true); }
+      finally {
+        checkingSubmission = false;
+        for (const id of ["source-check", "source-submit", "source-inputs", "source-different"]) {
+          if ($(id)) $(id).disabled = false;
+        }
+      }
+    }
+    $("source-check")?.addEventListener("click", checkSubmission);
+    $("source-different")?.addEventListener("click", () => {
+      if (sending || checkingSubmission || stopped || !window.confirm("This clears the current inputs without cancelling the previous submission. It may still finish; check recent activity before adding it again. Start a different source?")) return;
+      remember(null); $("source-form").reset(); chooseKind();
+      $("source-check").hidden = true; $("source-different").hidden = true;
+      notice("Ready for a different source. The previous submission has not been cancelled.");
+    });
+    $("sources-refresh").addEventListener("click", () => { polls = 0; refreshSources(); });
+    async function sourceInput() {
+      let bytes, filename;
+      if (document.querySelector('[name="source-kind"]:checked').value === "text") {
+        filename = $("source-name").value.trim() + ".txt";
+        if (!$("source-text").value.trim()) throw new Error("Paste some text before adding this source.");
+        bytes = new TextEncoder().encode($("source-text").value);
+      } else {
+        const file = $("source-file").files[0];
+        if (!file || file.size > Number(sources.dataset.limit)) throw new Error("Choose a file within the size limit.");
+        filename = file.name; bytes = new Uint8Array(await file.arrayBuffer());
+      }
+      if (!bytes.length || bytes.length > Number(sources.dataset.limit)) throw new Error("The source is empty or exceeds the size limit.");
+      const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
+        value => value.toString(16).padStart(2, "0")).join("");
+      const fingerprint = filename + ":" + digest;
+      return {bytes, filename, fingerprint};
+    }
+    $("source-form")?.addEventListener("submit", async event => {
+      event.preventDefault(); if (sending || checkingSubmission || stopped) return;
+      const recovering = Boolean(pending);
+      sending = true; $("source-submit").disabled = true; $("source-inputs").disabled = true;
+      let submitted = false;
+      try {
+        const {bytes, filename, fingerprint} = await sourceInput();
+        if (pending && pending.fingerprint !== fingerprint) {
+          throw new Error("A previous submission is unconfirmed. Check it first, or retry with the same name and source.");
+        }
+        if (!pending) remember({id: crypto.randomUUID(), fingerprint});
+        let binary = "";
+        for (let offset = 0; offset < bytes.length; offset += 8192) {
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+        }
+        notice("Sending source…");
+        submitted = true;
+        const job = await request(base + "/sources", {filename, content_base64: btoa(binary), submission_id: pending.id});
+        if (stopped) return;
+        accepted(job); await refreshSources();
+      } catch (error) {
+        if (stopped) return;
+        notice(error.message, true);
+        if (pending && submitted) {
+          if (!recovering && error.status && error.status < 500 && error.status !== 429) remember(null);
+          else {
+            $("source-check").hidden = false;
+            $("source-different").hidden = false;
+            notice(recovering && error.status && error.status < 500
+              ? error.message + " The earlier submission is still unconfirmed. Check its status before retrying."
+              : "Submission could not be confirmed. Check its status before retrying. Your source has not been cleared.", true);
+          }
+        }
+      } finally {
+        sending = false;
+        if ($("source-submit")) { $("source-submit").disabled = false; $("source-inputs").disabled = false; }
+      }
+    });
+    if (pending && $("source-form")) {
+      $("source-check").hidden = false; $("source-different").hidden = false; checkSubmission();
+    }
+    window.addEventListener("focus", refreshSources);
+    window.addEventListener("pageshow", event => { if (event.persisted) refreshSources(); });
+    document.addEventListener("visibilitychange", refreshSources);
+    refreshSources();
   }
 
   const root = $("access-page");

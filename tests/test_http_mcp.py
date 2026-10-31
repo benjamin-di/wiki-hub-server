@@ -297,3 +297,15 @@ async def test_rest_and_remote_mcp_record_verified_clients_and_ignore_public_hea
         await asyncio.gather(*service.tasks)
         service.state.set_user_status('owner', True)
         assert (await client.get('/api/me/apps', headers=headers)).status_code == 403
+
+
+def test_wiki_creation_purpose_and_unsupported_head_do_not_cross_methods(settings, service):
+    with TestClient(create_app(settings, service, FixtureVerifier())) as client:
+        headers = {"Authorization": "Bearer owner-token"}
+        assert client.head("/api/wikis", headers=headers).status_code == 404
+        assert client.get("/api/wikis", headers=headers).json() == []
+        created = client.post("/api/wikis", headers=headers,
+                              json={"slug": "plans", "title": "Plans", "purpose": "Keep meeting notes"})
+        assert created.status_code == 201
+        page = client.get("/api/wikis/plans/page?path=wiki/index.md", headers=headers)
+        assert "Keep meeting notes" in page.json()["content"]

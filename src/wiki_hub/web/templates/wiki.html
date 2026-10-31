@@ -1,8 +1,30 @@
 {% extends "base.html" %}
 {% block title %}{{ wiki.title }} · Wiki Hub{% endblock %}
 {% block content %}
-<a class="back" href="/">← My wikis</a><div class="page-top"><div><div class="eyebrow">Wiki overview</div><h1>{{ wiki.title }}</h1><p class="muted">{{ wiki.slug }}</p></div>{% if wiki.manage %}<a class="button primary" href="/wikis/{{ wiki.slug }}/access">Share</a><a class="button" href="/wikis/{{ wiki.slug }}/settings">Settings</a>{% endif %}</div>
-<section class="panel"><h2>Your access</h2><p><span class="pill">{{ 'Owner' if wiki.owner else labels[wiki.role] }}</span></p><p class="muted">{{ descriptions[wiki.role] }}</p>{% if wiki.read_only %}<div class="notice">This wiki is archived or its archive update is pending. Its content is read only.</div>{% endif %}<p class="help">Managed Git copies and network drive access are {{ 'allowed by your current copy settings' if wiki.local_copies else 'unavailable under your current copy settings' }}.</p></section>
+<a class="back" href="/">← My wikis</a>
+<div class="page-top overview-top"><div><div class="eyebrow">Wiki overview</div><h1>{{ wiki.title }}</h1><p class="muted">{{ wiki.slug }}</p></div>{% if wiki.manage %}<div class="member-controls" id="overview-sharing"><a class="button" href="/wikis/{{ wiki.slug }}/access">Share</a><a class="button subtle" href="/wikis/{{ wiki.slug }}/settings">Settings</a></div>{% endif %}</div>
+<div id="message" class="status" role="status" aria-live="polite"></div>
+<p>{% if wiki.private %}<span class="pill" id="overview-access">Only you have access</span>{% else %}<span class="pill" id="overview-access">{{ 'Owner' if wiki.owner else labels[wiki.role] }}</span>{% endif %} <span class="help">A wiki link does not grant access.</span></p>
+{% if wiki.status == 'initializing' %}<div class="notice">Wiki creation is unfinished. Recover the original creation request with the CLI or API before adding sources. Your reserved name and any initial commit are preserved.</div>{% elif wiki.read_only %}<div class="notice">This wiki is archived or its archive update is pending. Its content is read only.</div>{% endif %}
+<div id="sources-page" data-wiki="{{ wiki.slug }}" data-subject="{{ person.subject }}" data-limit="{{ upload_limit }}">
+{% if not wiki.read_only and wiki.role != 'read' %}
+<section class="panel" aria-labelledby="source-heading">
+  <h2 id="source-heading">Add a source</h2>
+  <p class="muted">Upload a document or paste a note. Your original is preserved; accepted content is organized and saved automatically.</p>
+  <form id="source-form">
+    <fieldset id="source-inputs"><legend class="search-label">Source</legend>
+      <div class="member-controls source-kinds"><label class="checkbox"><input type="radio" name="source-kind" value="file" checked> Upload a file</label><label class="checkbox"><input type="radio" name="source-kind" value="text"> Paste text</label></div>
+      <div id="source-file-fields"><label for="source-file">File</label><input id="source-file" type="file" required><p class="help">Documents, images, emails and text files. Maximum {{ (upload_limit / 1024 / 1024)|round(1) }} MB per source.</p></div>
+      <div id="source-text-fields" hidden><label for="source-name">Source name</label><input id="source-name" maxlength="100" placeholder="Meeting notes" disabled><p class="help">Saved as a text file alongside your wiki's sources.</p><label for="source-text">Text</label><textarea id="source-text" rows="7" disabled></textarea></div>
+    </fieldset>
+    <div id="source-message" class="status" role="status" aria-live="polite"></div>
+    <div class="member-controls source-actions"><button id="source-submit" class="button primary" type="submit">Add source</button><button id="source-check" class="button" type="button" hidden>Check submission</button><button id="source-different" class="button subtle" type="button" hidden>Add a different source</button></div>
+  </form>
+</section>
+{% endif %}
+<section class="panel" aria-labelledby="sources-heading"><div class="section-top"><h2 id="sources-heading">Recent source activity</h2><button class="button" id="sources-refresh" type="button">Refresh status</button></div><p id="sources-error" class="status" role="status"></p><div id="source-jobs" aria-live="polite"><p class="muted">Loading source activity…</p></div><p class="help">Failed or interrupted sources stay visible for review. Checking status never reruns the model.</p></section>
+</div>
+<details class="panel"><summary>How it works · example walkthrough</summary><p>For example, add a workshop note that says “Doors open at 09:30.” Wiki Hub keeps the original, extracts a faithful reference and organizes a page with source citations. Later, a connected app can answer when the doors open and show its source.</p><p class="help">This is a fictional example, kept here in Help. It is never added to your wiki.</p></details>
 <section class="panel"><h2>Use this wiki</h2><p class="muted">Connect through the Wiki CLI, your configured network drive or an agent with explicit access.</p><pre><code>wiki search {{ wiki.slug }} "your question"
-wiki read {{ wiki.slug }} wiki/index.md</code></pre><p class="help">Your current permissions apply to every connection. A wiki link does not grant access.</p></section>
+wiki read {{ wiki.slug }} wiki/index.md</code></pre><p class="help">Your current permissions apply to every connection. Managed Git copies and network drive access are {{ 'allowed by your current copy settings' if wiki.local_copies else 'unavailable under your current copy settings' }}.</p></section>
 {% endblock %}
